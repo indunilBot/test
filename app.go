@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/cockroachdb/pebble"
@@ -28,6 +29,9 @@ func (a *App) startup(ctx context.Context) {
 
 // AddConnection adds a new PebbleDB connection by opening the directory.
 func (a *App) AddConnection(name string, path string) error {
+	if _, exists := connections.Load(name); exists {
+		return fmt.Errorf("connection '%s' already exists", name)
+	}
 	db, err := pebble.Open(path, &pebble.Options{ReadOnly: true})
 	if err != nil {
 		return err
@@ -48,6 +52,16 @@ func (a *App) GetDatabases() []string {
 		return []string{}
 	}
 	return list
+}
+
+// GetConnectionPaths returns a copy of the connection name -> path map.
+func (a *App) GetConnectionPaths() map[string]string {
+	result := make(map[string]string)
+	connections.Range(func(k, v interface{}) bool {
+		result[k.(string)] = v.(string)
+		return true
+	})
+	return result
 }
 
 // GetKeysByPrefix returns keys grouped by prefix (e.g., "user:" -> "user").
@@ -86,6 +100,60 @@ func (a *App) GetValue(dbName string, key string) string {
 	}
 	defer closer.Close()
 	return string(value)
+}
+
+// UpdateConnection allows changing the name or path (or both) for an existing connection.
+func (a *App) UpdateConnection(oldName, newName, path string) error {
+	connAny, ok := connections.Load(oldName)
+	if !ok {
+		return fmt.Errorf("connection '%s' not found", oldName)
+	}
+	oldPath := connAny.(string)
+
+	dbAny, _ := dbs.Load(oldName)
+	oldDB, _ := dbAny.(*pebble.DB)
+
+	newPath := path
+	if newPath == "" {
+		newPath = oldPath
+	}
+
+	if newName == "" {
+		newName = oldName
+	}
+
+	if newName != oldName {
+		if _, exists := connections.Load(newName); exists {
+			return fmt.Errorf("connection '%s' already exists", newName)
+		}
+	}
+
+	var newDB *pebble.DB
+	var err error
+
+	if newPath != oldPath || oldDB == nil {
+		newDB, err = pebble.Open(newPath, &pebble.Options{ReadOnly: true})
+		if err != nil {
+			return err
+		}
+	} else {
+		newDB = oldDB
+	}
+
+	// Remove old mappings
+	connections.Delete(oldName)
+	dbs.Delete(oldName)
+
+	// Store the updated entries
+	connections.Store(newName, newPath)
+	dbs.Store(newName, newDB)
+
+	// Close the old DB if we replaced it with a new handle
+	if newDB != oldDB && oldDB != nil {
+		oldDB.Close()
+	}
+
+	return nil
 }
 
 // shutdown closes all DBs (called on app close).

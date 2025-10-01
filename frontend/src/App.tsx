@@ -12,6 +12,7 @@ import {
   Key,
   Filter,
   Download,
+  Pencil,
 } from 'lucide-react';
 import * as backend from '../wailsjs/go/main/App';
 
@@ -28,6 +29,8 @@ export default function PebbleDBExplorer() {
   const [connectionName, setConnectionName] = useState('');
   const [connectionPath, setConnectionPath] = useState('');
   const [connectionError, setConnectionError] = useState<string | null>(null);
+  const [connectionPaths, setConnectionPaths] = useState<Record<string, string>>({});
+  const [connectionToEdit, setConnectionToEdit] = useState<string | null>(null);
 
   const hasWailsBackend = () => Boolean((window as any).go?.main?.App);
 
@@ -38,6 +41,15 @@ export default function PebbleDBExplorer() {
     }
     console.warn('Wails backend not available. Returning empty database list.');
     return [] as string[];
+  };
+
+  const safeGetConnectionPaths = async () => {
+    if (hasWailsBackend()) {
+      const result = await backend.GetConnectionPaths();
+      return result ?? {};
+    }
+    console.warn('Wails backend not available. Returning empty connection paths.');
+    return {} as Record<string, string>;
   };
 
   const safeGetKeysByPrefix = async (db: string) => {
@@ -63,19 +75,35 @@ export default function PebbleDBExplorer() {
     await backend.AddConnection(name, path);
   };
 
+  const safeUpdateConnection = async (oldName: string, newName: string, path: string) => {
+    if (!hasWailsBackend()) {
+      throw new Error('Wails backend is not available. Run the desktop app to edit connections.');
+    }
+    await backend.UpdateConnection(oldName, newName, path);
+  };
+
   const resetConnectionForm = () => {
     setConnectionName('');
     setConnectionPath('');
     setConnectionError(null);
   };
 
-  const openConnectionForm = () => {
-    resetConnectionForm();
+  const openConnectionForm = (name?: string) => {
+    if (name) {
+      setConnectionToEdit(name);
+      setConnectionName(name);
+      setConnectionPath(connectionPaths[name] ?? '');
+      setConnectionError(null);
+    } else {
+      setConnectionToEdit(null);
+      resetConnectionForm();
+    }
     setIsAddingConnection(true);
   };
 
   const closeConnectionForm = () => {
     setIsAddingConnection(false);
+    setConnectionToEdit(null);
     resetConnectionForm();
   };
 
@@ -95,6 +123,8 @@ export default function PebbleDBExplorer() {
   const submitConnection = async () => {
     const trimmedName = connectionName.trim();
     const trimmedPath = connectionPath.trim();
+    const isEditing = connectionToEdit !== null;
+
     if (!trimmedName) {
       setConnectionError('Enter a connection name.');
       return;
@@ -104,10 +134,30 @@ export default function PebbleDBExplorer() {
       return;
     }
 
+    const nameExists = dbs
+      .filter(db => (isEditing ? db !== connectionToEdit : true))
+      .some(db => db === trimmedName);
+
+    if (nameExists) {
+      setConnectionError('A connection with this name already exists.');
+      return;
+    }
+
     try {
-      await safeAddConnection(trimmedName, trimmedPath);
+      if (isEditing && connectionToEdit) {
+        await safeUpdateConnection(connectionToEdit, trimmedName, trimmedPath);
+      } else {
+        await safeAddConnection(trimmedName, trimmedPath);
+      }
       const newDbs: string[] = await safeGetDatabases();
       setDbs(newDbs);
+      const newPaths = await safeGetConnectionPaths();
+      setConnectionPaths(newPaths);
+      setKeysByDb(prev => {
+        const updated = { ...prev };
+        delete updated[selectedDb];
+        return updated;
+      });
       setSelectedDb(trimmedName);
       closeConnectionForm();
     } catch (err: any) {
@@ -117,6 +167,7 @@ export default function PebbleDBExplorer() {
 
   useEffect(() => {
     safeGetDatabases().then((res: string[]) => setDbs(res ?? []));
+    safeGetConnectionPaths().then(paths => setConnectionPaths(paths ?? {}));
   }, []);
 
   useEffect(() => {
@@ -182,7 +233,7 @@ export default function PebbleDBExplorer() {
             <h1 className="text-lg font-semibold tracking-wide">GPaw Explorer</h1>
           </div>
           <button
-            onClick={openConnectionForm}
+            onClick={() => openConnectionForm()}
             className="w-full inline-flex items-center justify-center gap-2 rounded-lg bg-[#003C67] px-4 py-2 font-medium text-white transition hover:opacity-90"
           >
             <Plus className="w-4 h-4" />
@@ -207,6 +258,16 @@ export default function PebbleDBExplorer() {
               <span className="text-xs text-slate-300">
                 {Object.keys(keysByDb[db] || {}).reduce((sum, p) => sum + (keysByDb[db][p]?.length || 0), 0)}
               </span>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  openConnectionForm(db);
+                }}
+                className="ml-1 rounded-md p-1 text-slate-200 transition hover:bg-slate-800/60"
+                title="Edit connection"
+              >
+                <Pencil className="h-3.5 w-3.5" />
+              </button>
             </div>
           ))}
           {dbs.length === 0 && (
@@ -423,7 +484,9 @@ export default function PebbleDBExplorer() {
         <div className="absolute inset-0 z-40 flex items-center justify-center bg-slate-900/70 px-4">
           <div className="w-full max-w-xl rounded-2xl bg-white p-6 shadow-2xl">
             <div className="mb-4">
-              <h2 className="text-xl font-semibold text-slate-900">Add PebbleDB Connection</h2>
+              <h2 className="text-xl font-semibold text-slate-900">
+                {connectionToEdit ? 'Edit Connection' : 'Add PebbleDB Connection'}
+              </h2>
               <p className="mt-1 text-sm text-slate-500">
                 Paste the database directory path or browse to it. Example:
                 <code className="ml-1 rounded bg-slate-100 px-2 py-0.5 text-xs text-slate-600">
@@ -483,7 +546,7 @@ export default function PebbleDBExplorer() {
                   onClick={submitConnection}
                   className="rounded-lg bg-[#003C67] px-4 py-2 text-sm font-semibold text-white transition hover:opacity-90"
                 >
-                  Connect
+                  {connectionToEdit ? 'Save Changes' : 'Connect'}
                 </button>
               </div>
             </div>
