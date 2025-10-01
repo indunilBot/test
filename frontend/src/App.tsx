@@ -14,7 +14,6 @@ import {
   Download,
 } from 'lucide-react';
 import * as backend from '../wailsjs/go/main/App';
-import './App.css';
 
 export default function PebbleDBExplorer() {
   const [dbs, setDbs] = useState<string[]>([]);
@@ -61,12 +60,10 @@ export default function PebbleDBExplorer() {
     await backend.AddConnection(name, path);
   };
 
-  // Fetch databases on load
   useEffect(() => {
     safeGetDatabases().then((res: string[]) => setDbs(res ?? []));
   }, []);
 
-  // Fetch keys when DB selected
   useEffect(() => {
     if (selectedDb && !keysByDb[selectedDb]) {
       safeGetKeysByPrefix(selectedDb).then((prefixes: { [prefix: string]: string[] } | null) => {
@@ -77,7 +74,6 @@ export default function PebbleDBExplorer() {
     }
   }, [selectedDb]);
 
-  // Fetch value when key selected
   useEffect(() => {
     if (selectedDb && selectedKey) {
       const cacheKey = `${selectedDb}_${selectedKey}`;
@@ -91,7 +87,6 @@ export default function PebbleDBExplorer() {
     }
   }, [selectedDb, selectedKey]);
 
-  // Handle new connection
   const handleNewConnection = async () => {
     const name = prompt('Enter connection name:');
     if (!name) return;
@@ -111,10 +106,8 @@ export default function PebbleDBExplorer() {
     }
   };
 
-  // Get prefixes for selected DB
   const getKeysByPrefix = () => keysByDb[selectedDb] || {};
 
-  // Filtered keys for list view
   const filteredKeys = () => {
     const prefixes = getKeysByPrefix();
     let allKeys: string[] = [];
@@ -134,7 +127,6 @@ export default function PebbleDBExplorer() {
     setExpandedKeys(newExpanded);
   };
 
-  // Refresh keys for current DB
   const handleRefresh = () => {
     if (selectedDb) {
       safeGetKeysByPrefix(selectedDb).then((prefixes: { [prefix: string]: string[] } | null) => {
@@ -146,157 +138,188 @@ export default function PebbleDBExplorer() {
   };
 
   return (
-    <div className="app-layout">
-      <div className="sidebar">
-        <div className="sidebar-header">
-          <div className="sidebar-title">
-            <Database className="icon-lg" style={{ color: '#ADD8E6' }} />
-            <h1>GPaw Explorer</h1>
+    <div className="flex h-screen bg-slate-100 text-slate-900">
+      <div className="w-64 bg-[#19334D] text-slate-100 flex flex-col">
+        <div className="p-4 border-b border-slate-700/60">
+          <div className="flex items-center gap-2 mb-4">
+            <Database className="w-6 h-6 text-slate-200" />
+            <h1 className="text-lg font-semibold tracking-wide">GPaw Explorer</h1>
           </div>
-          <button onClick={handleNewConnection} className="sidebar-button">
-            <Plus className="icon-sm" />
+          <button
+            onClick={handleNewConnection}
+            className="w-full inline-flex items-center justify-center gap-2 rounded-lg bg-[#003C67] px-4 py-2 font-medium text-white transition hover:opacity-90"
+          >
+            <Plus className="w-4 h-4" />
             New Connection
           </button>
         </div>
 
-        <div className="sidebar-content">
-          <div className="sidebar-section-title">DATABASES</div>
+        <div className="flex-1 overflow-y-auto p-2">
+          <div className="px-2 py-1 text-xs font-semibold uppercase tracking-[0.2em] text-slate-400">Databases</div>
           {dbs.map(db => (
             <div
               key={db}
               onClick={() => setSelectedDb(db)}
-              className={`database-item ${selectedDb === db ? 'active' : ''}`}
+              className={`mb-1 flex cursor-pointer items-center gap-2 rounded-lg px-3 py-2 text-sm transition ${
+                selectedDb === db
+                  ? 'bg-[#003C67] text-white shadow-inner'
+                  : 'hover:bg-slate-800/40'
+              }`}
             >
-              <Database className="icon-sm" />
-              <span className="database-name">{db}</span>
-              <span className="database-count">
+              <Database className="w-4 h-4" />
+              <span className="flex-1 truncate">{db}</span>
+              <span className="text-xs text-slate-300">
                 {Object.keys(keysByDb[db] || {}).reduce((sum, p) => sum + (keysByDb[db][p]?.length || 0), 0)}
               </span>
             </div>
           ))}
           {dbs.length === 0 && (
-            <div className="empty-state">No databases connected. Add a new connection.</div>
+            <div className="px-3 py-2 text-sm text-slate-300">
+              No databases connected. Add a new connection.
+            </div>
           )}
         </div>
 
-        <div className="sidebar-footer">
-          <button className="sidebar-footer-button">
-            <Settings className="icon-sm" />
+        <div className="border-t border-slate-700/60 p-4">
+          <button className="w-full inline-flex items-center gap-2 rounded-lg px-3 py-2 text-left text-sm transition hover:bg-slate-800/50">
+            <Settings className="w-4 h-4" />
             Settings
           </button>
         </div>
       </div>
 
-      <div className="main-panel">
-        <div className="toolbar">
-          <div className="search-wrapper">
-            <Search className="icon-md search-icon" />
+      <div className="flex flex-1 flex-col bg-white">
+        <div className="flex items-center gap-3 border-b border-slate-200 bg-white p-4">
+          <div className="relative flex-1">
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-5 w-5 -translate-y-1/2 text-slate-400" />
             <input
               type="text"
               placeholder="Search keys..."
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
-              className="search-input"
+              className="w-full rounded-lg border border-slate-300 bg-white py-2 pl-10 pr-4 text-sm shadow-sm transition focus:border-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-500"
             />
           </div>
-          <button className="toolbar-button-secondary">
-            <Filter className="icon-sm" />
+          <button className="inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-sky-100 px-4 py-2 text-sm font-medium text-sky-800 transition hover:bg-sky-200">
+            <Filter className="w-4 h-4" />
             Filter
           </button>
-          <button onClick={handleRefresh} className="toolbar-button-secondary">
-            <RefreshCw className="icon-sm" />
+          <button
+            onClick={handleRefresh}
+            className="inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-sky-100 px-4 py-2 text-sm font-medium text-sky-800 transition hover:bg-sky-200"
+          >
+            <RefreshCw className="w-4 h-4" />
             Refresh
           </button>
-          <button className="toolbar-button-primary">
-            <Plus className="icon-sm" />
+          <button className="inline-flex items-center gap-2 rounded-lg bg-[#003C67] px-4 py-2 text-sm font-medium text-white transition hover:opacity-90">
+            <Plus className="w-4 h-4" />
             Add Key
           </button>
         </div>
 
-        <div className="content-split">
-          <div className="keys-panel">
-            <div className="keys-panel-header">
+        <div className="flex flex-1 min-h-0">
+          <div className="flex w-80 flex-col border-r border-slate-200 bg-white">
+            <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3 text-sm font-medium text-slate-600">
               <span>
-                Keys ({viewMode === 'tree' ? Object.keys(getKeysByPrefix()).reduce((sum, p) => sum + getKeysByPrefix()[p].length, 0) : filteredKeys().length})
+                Keys ({viewMode === 'tree'
+                  ? Object.keys(getKeysByPrefix()).reduce((sum, p) => sum + getKeysByPrefix()[p].length, 0)
+                  : filteredKeys().length})
               </span>
-              <div className="view-toggle-group">
+              <div className="flex gap-2">
                 <button
                   onClick={() => setViewMode('tree')}
-                  className={`view-toggle-button ${viewMode === 'tree' ? 'active' : ''}`}
+                  className={`rounded-md px-3 py-1 text-xs font-semibold transition ${
+                    viewMode === 'tree'
+                      ? 'bg-sky-100 text-sky-800'
+                      : 'text-slate-500 hover:bg-slate-100'
+                  }`}
                 >
                   Tree
                 </button>
                 <button
                   onClick={() => setViewMode('list')}
-                  className={`view-toggle-button ${viewMode === 'list' ? 'active' : ''}`}
+                  className={`rounded-md px-3 py-1 text-xs font-semibold transition ${
+                    viewMode === 'list'
+                      ? 'bg-sky-100 text-sky-800'
+                      : 'text-slate-500 hover:bg-slate-100'
+                  }`}
                 >
                   List
                 </button>
               </div>
             </div>
 
-            <div className="keys-scroll">
-              {viewMode === 'tree' ? (
-                Object.entries(getKeysByPrefix()).map(([prefix, keys]) => (
-                  <div key={prefix} className="prefix-group">
-                    <div onClick={() => toggleExpand(prefix)} className="prefix-header">
-                      {expandedKeys.has(prefix) ? (
-                        <ChevronDown className="icon-sm" />
-                      ) : (
-                        <ChevronRight className="icon-sm" />
-                      )}
-                      <Key className="icon-sm" style={{ color: '#003C67' }} />
-                      <span className="prefix-label">{prefix || 'default'}</span>
-                      <span className="prefix-count">{keys.length}</span>
-                    </div>
-                    {expandedKeys.has(prefix) && (
-                      <div className="prefix-keys">
-                        {keys.map(key => (
-                          <div
-                            key={key}
-                            onClick={() => setSelectedKey(key)}
-                            className={`key-item ${selectedKey === key ? 'active' : ''}`}
-                          >
-                            <FileText className="icon-sm" />
-                            {key}
-                          </div>
-                        ))}
+            <div className="flex-1 overflow-y-auto p-3 space-y-2">
+              {viewMode === 'tree'
+                ? Object.entries(getKeysByPrefix()).map(([prefix, keys]) => (
+                    <div key={prefix} className="space-y-1">
+                      <div
+                        onClick={() => toggleExpand(prefix)}
+                        className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1 text-sm font-medium text-slate-600 transition hover:bg-sky-100"
+                      >
+                        {expandedKeys.has(prefix) ? (
+                          <ChevronDown className="h-4 w-4 text-slate-500" />
+                        ) : (
+                          <ChevronRight className="h-4 w-4 text-slate-500" />
+                        )}
+                        <Key className="h-4 w-4 text-sky-700" />
+                        <span>{prefix || 'default'}</span>
+                        <span className="ml-auto text-xs text-slate-400">{keys.length}</span>
                       </div>
-                    )}
-                  </div>
-                ))
-              ) : (
-                filteredKeys().map(key => (
-                  <div
-                    key={key}
-                    onClick={() => setSelectedKey(key)}
-                    className={`keys-list-item ${selectedKey === key ? 'active' : ''}`}
-                  >
-                    <Key className="icon-sm" />
-                    <span>{key}</span>
-                  </div>
-                ))
-              )}
+                      {expandedKeys.has(prefix) && (
+                        <div className="ml-6 space-y-1">
+                          {keys.map(key => (
+                            <div
+                              key={key}
+                              onClick={() => setSelectedKey(key)}
+                              className={`flex cursor-pointer items-center gap-2 rounded-md px-2 py-1 text-sm transition ${
+                                selectedKey === key
+                                  ? 'bg-sky-100 text-sky-800'
+                                  : 'text-slate-600 hover:bg-slate-100'
+                              }`}
+                            >
+                              <FileText className="h-4 w-4" />
+                              <span className="truncate">{key}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  ))
+                : filteredKeys().map(key => (
+                    <div
+                      key={key}
+                      onClick={() => setSelectedKey(key)}
+                      className={`flex cursor-pointer items-center gap-2 rounded-md px-3 py-2 text-sm transition ${
+                        selectedKey === key
+                          ? 'bg-sky-100 text-sky-800'
+                          : 'text-slate-600 hover:bg-slate-100'
+                      }`}
+                    >
+                      <Key className="h-4 w-4" />
+                      <span className="truncate">{key}</span>
+                    </div>
+                  ))}
             </div>
           </div>
 
-          <div className="value-panel">
+          <div className="flex-1 overflow-y-auto bg-white">
             {selectedKey ? (
-              <div className="value-wrapper">
-                <div className="value-header">
-                  <h2 className="value-title">{selectedKey}</h2>
-                  <div className="value-actions">
-                    <button>
-                      <Download className="icon-sm" />
+              <div className="p-6 space-y-6">
+                <div className="flex items-center justify-between border-b border-slate-200 pb-4">
+                  <h2 className="text-xl font-semibold text-slate-900">{selectedKey}</h2>
+                  <div className="flex gap-2">
+                    <button className="inline-flex items-center gap-2 rounded-md border border-slate-300 bg-white px-3 py-1 text-sm transition hover:bg-slate-100">
+                      <Download className="h-4 w-4" />
                       Export
                     </button>
-                    <button className="danger">
-                      <Trash2 className="icon-sm" />
+                    <button className="inline-flex items-center gap-2 rounded-md border border-rose-400 bg-rose-50 px-3 py-1 text-sm text-rose-600 transition hover:bg-rose-100">
+                      <Trash2 className="h-4 w-4" />
                       Delete
                     </button>
                   </div>
                 </div>
-                <div className="value-meta">
+                <div className="flex flex-wrap items-center gap-6 text-sm text-slate-600">
                   {(() => {
                     const cacheKey = `${selectedDb}_${selectedKey}`;
                     const rawValue = values[cacheKey] || '';
@@ -314,7 +337,7 @@ export default function PebbleDBExplorer() {
                     return (
                       <>
                         <span>
-                          Type: <span className="font-mono" style={{ color: '#003C67' }}>{type}</span>
+                          Type: <span className="font-mono text-sky-700">{type}</span>
                         </span>
                         <span>
                           Size: <span className="font-mono">{size}</span>
@@ -323,9 +346,8 @@ export default function PebbleDBExplorer() {
                     );
                   })()}
                 </div>
-
-                <div className="value-code">
-                  <pre>
+                <div className="rounded-xl bg-[#19334D] p-4 shadow-inner">
+                  <pre className="overflow-auto text-sm font-mono text-emerald-300">
                     {(() => {
                       const cacheKey = `${selectedDb}_${selectedKey}`;
                       const rawValue = values[cacheKey];
@@ -339,18 +361,21 @@ export default function PebbleDBExplorer() {
                     })()}
                   </pre>
                 </div>
-
-                <div className="value-footer">
-                  <button className="primary-action">Save Changes</button>
-                  <button className="secondary-action">Cancel</button>
+                <div className="flex gap-3">
+                  <button className="inline-flex items-center gap-2 rounded-lg bg-[#003C67] px-4 py-2 text-sm font-medium text-white transition hover:opacity-90">
+                    Save Changes
+                  </button>
+                  <button className="inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-100">
+                    Cancel
+                  </button>
                 </div>
               </div>
             ) : (
-              <div className="value-empty-state">
-                <div className="value-empty-state-content">
-                  <Database className="icon-lg" style={{ opacity: 0.5 }} />
-                  <p>Select a key to view its value</p>
-                  <p style={{ fontSize: '0.9rem', marginTop: '0.35rem' }}>Choose from the list on the left</p>
+              <div className="flex h-full items-center justify-center text-slate-400">
+                <div className="text-center space-y-2">
+                  <Database className="mx-auto h-16 w-16 opacity-50" />
+                  <p className="text-lg font-medium">Select a key to view its value</p>
+                  <p className="text-sm">Choose from the list on the left</p>
                 </div>
               </div>
             )}
