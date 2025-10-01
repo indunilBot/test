@@ -1,0 +1,19 @@
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/package-lock.json
+
+# Build
+build/
+*.exe
+*.app
+
+# Wails
+wailsjs/
+
+# Go
+*.log
+tmp/
+
+# OS
+.DS_Store
