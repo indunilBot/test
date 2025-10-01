@@ -24,6 +24,10 @@ export default function PebbleDBExplorer() {
   const [expandedKeys, setExpandedKeys] = useState<Set<string>>(new Set());
   const [keysByDb, setKeysByDb] = useState<{ [db: string]: { [prefix: string]: string[] } }>({});
   const [values, setValues] = useState<{ [cacheKey: string]: string }>({});
+  const [isAddingConnection, setIsAddingConnection] = useState(false);
+  const [connectionName, setConnectionName] = useState('');
+  const [connectionPath, setConnectionPath] = useState('');
+  const [connectionError, setConnectionError] = useState<string | null>(null);
 
   const hasWailsBackend = () => Boolean((window as any).go?.main?.App);
 
@@ -54,10 +58,61 @@ export default function PebbleDBExplorer() {
 
   const safeAddConnection = async (name: string, path: string) => {
     if (!hasWailsBackend()) {
-      console.warn('Wails backend not available. Connection will not be persisted.');
-      return;
+      throw new Error('Wails backend is not available. Run the desktop app to add connections.');
     }
     await backend.AddConnection(name, path);
+  };
+
+  const resetConnectionForm = () => {
+    setConnectionName('');
+    setConnectionPath('');
+    setConnectionError(null);
+  };
+
+  const openConnectionForm = () => {
+    resetConnectionForm();
+    setIsAddingConnection(true);
+  };
+
+  const closeConnectionForm = () => {
+    setIsAddingConnection(false);
+    resetConnectionForm();
+  };
+
+  const handleBrowseForPath = async () => {
+    const runtime = (window as any).runtime;
+    if (runtime?.OpenDirectoryDialog) {
+      const selected = await runtime.OpenDirectoryDialog({ title: 'Select PebbleDB Directory' });
+      if (selected) {
+        setConnectionPath(selected);
+        setConnectionError(null);
+      }
+    } else {
+      setConnectionError('Directory picker is not available in this environment. Please paste the path manually.');
+    }
+  };
+
+  const submitConnection = async () => {
+    const trimmedName = connectionName.trim();
+    const trimmedPath = connectionPath.trim();
+    if (!trimmedName) {
+      setConnectionError('Enter a connection name.');
+      return;
+    }
+    if (!trimmedPath) {
+      setConnectionError('Provide the PebbleDB directory path.');
+      return;
+    }
+
+    try {
+      await safeAddConnection(trimmedName, trimmedPath);
+      const newDbs: string[] = await safeGetDatabases();
+      setDbs(newDbs);
+      setSelectedDb(trimmedName);
+      closeConnectionForm();
+    } catch (err: any) {
+      setConnectionError(err?.message ?? String(err));
+    }
   };
 
   useEffect(() => {
@@ -86,25 +141,6 @@ export default function PebbleDBExplorer() {
       }
     }
   }, [selectedDb, selectedKey]);
-
-  const handleNewConnection = async () => {
-    const name = prompt('Enter connection name:');
-    if (!name) return;
-    const runtime = (window as any).runtime;
-    const path = runtime?.OpenDirectoryDialog
-      ? await runtime.OpenDirectoryDialog({ title: 'Select PebbleDB Directory' })
-      : prompt('Enter the PebbleDB directory path:');
-    if (path) {
-      try {
-        await safeAddConnection(name, path);
-        const newDbs: string[] = await safeGetDatabases();
-        setDbs(newDbs);
-        setSelectedDb(name);
-      } catch (err) {
-        alert(`Error adding connection: ${err}`);
-      }
-    }
-  };
 
   const getKeysByPrefix = () => keysByDb[selectedDb] || {};
 
@@ -138,7 +174,7 @@ export default function PebbleDBExplorer() {
   };
 
   return (
-    <div className="flex h-screen bg-slate-100 text-slate-900">
+    <div className="relative flex h-screen bg-slate-100 text-slate-900">
       <div className="w-64 bg-[#19334D] text-slate-100 flex flex-col">
         <div className="p-4 border-b border-slate-700/60">
           <div className="flex items-center gap-2 mb-4">
@@ -146,7 +182,7 @@ export default function PebbleDBExplorer() {
             <h1 className="text-lg font-semibold tracking-wide">GPaw Explorer</h1>
           </div>
           <button
-            onClick={handleNewConnection}
+            onClick={openConnectionForm}
             className="w-full inline-flex items-center justify-center gap-2 rounded-lg bg-[#003C67] px-4 py-2 font-medium text-white transition hover:opacity-90"
           >
             <Plus className="w-4 h-4" />
@@ -382,6 +418,78 @@ export default function PebbleDBExplorer() {
           </div>
         </div>
       </div>
+
+      {isAddingConnection && (
+        <div className="absolute inset-0 z-40 flex items-center justify-center bg-slate-900/70 px-4">
+          <div className="w-full max-w-xl rounded-2xl bg-white p-6 shadow-2xl">
+            <div className="mb-4">
+              <h2 className="text-xl font-semibold text-slate-900">Add PebbleDB Connection</h2>
+              <p className="mt-1 text-sm text-slate-500">
+                Paste the database directory path or browse to it. Example:
+                <code className="ml-1 rounded bg-slate-100 px-2 py-0.5 text-xs text-slate-600">
+                  /Users/user/Desktop/indunil/paw/Go/paw-corenet-layer/coredb/pebbledb/slot-db
+                </code>
+              </p>
+            </div>
+
+            <div className="space-y-4">
+              <div>
+                <label className="text-sm font-medium text-slate-700">Connection Name</label>
+                <input
+                  value={connectionName}
+                  onChange={(e) => setConnectionName(e.target.value)}
+                  className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm shadow-sm focus:border-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-500"
+                  placeholder="e.g. slot-db"
+                />
+              </div>
+
+              <div>
+                <label className="text-sm font-medium text-slate-700">Database Path</label>
+                <div className="mt-1 flex gap-2">
+                  <input
+                    value={connectionPath}
+                    onChange={(e) => setConnectionPath(e.target.value)}
+                    className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm shadow-sm focus:border-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-500"
+                    placeholder="/path/to/pebbledb"
+                  />
+                  <button
+                    onClick={handleBrowseForPath}
+                    className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-100"
+                  >
+                    Browse
+                  </button>
+                </div>
+                {connectionPath && (
+                  <p className="mt-2 text-xs text-slate-500">
+                    Selected path: <span className="font-mono text-slate-600">{connectionPath}</span>
+                  </p>
+                )}
+              </div>
+
+              {connectionError && (
+                <div className="rounded-lg bg-rose-50 px-3 py-2 text-sm text-rose-600">
+                  {connectionError}
+                </div>
+              )}
+
+              <div className="flex justify-end gap-3">
+                <button
+                  onClick={closeConnectionForm}
+                  className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-100"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={submitConnection}
+                  className="rounded-lg bg-[#003C67] px-4 py-2 text-sm font-semibold text-white transition hover:opacity-90"
+                >
+                  Connect
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

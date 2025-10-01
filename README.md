@@ -1,145 +1,61 @@
-# GPaw Explorer - PebbleDB Blockchain Explorer
+# GPaw Explorer
 
-A desktop application to explore and visualize PebbleDB blockchain data built with Wails, React, and TypeScript.
+A Wails desktop client for inspecting PebbleDB blockchain data using a React + TypeScript frontend.
 
-## 🚀 How to Run This Project
-
-### Quick Start (Easiest Method)
+## Getting Started
 
 ```bash
-cd /Users/user/Desktop/indunil/paw/Go/GPaw-explorer/gpaw-explorer
-./quick-start.sh
-```
+# Install JS dependencies (first time only)
+cd frontend
+yarn install
 
-This will automatically:
-- Copy the database to avoid locking issues
-- Start the Wails dev server with Yarn
-- Open the application window
+# Build the frontend assets
+yarn build
 
-### Manual Start
-
-```bash
-# Navigate to project
-cd /Users/user/Desktop/indunil/paw/Go/GPaw-explorer/gpaw-explorer
-
-# Start development server
+# Run the desktop app (from repository root)
+cd ..
 wails dev
 ```
 
-**That's it!** The app window will open automatically.
+Use the **New Connection** button in the sidebar to point GPaw Explorer at a PebbleDB directory. Keys appear on the left; the selected value is rendered on the right with JSON pretty-printing when possible.
 
-## 📖 Using the App
-
-### Connect to Your Database
-
-1. **Click "New Connection"** (top left button)
-2. **Enter name**: `slot-db` (or any name)
-3. **Select directory**:
-   ```bash
-   # If database is locked, copy it first:
-   cp -r /Users/user/Desktop/indunil/paw/Go/paw-corenet-layer/coredb/pebbledb/slot-db /tmp/my-db
-
-   # Then select: /tmp/my-db
-   ```
-4. **Browse your blockchain data!**
-
-### UI Features
-
-- **Left**: Database list
-- **Middle**: Key browser (Tree/List view)
-- **Right**: JSON value viewer
-- **Search**: Filter keys
-- **Refresh**: Reload data
-
-## 🛠️ Commands
+## Available Commands
 
 ```bash
-# Development (hot reload)
+# Development mode with live reload
 wails dev
 
-# Build for production
+# Production build
 wails build
 
 # Frontend only
 cd frontend
-yarn dev        # Dev server
-yarn build      # Production build
-
-# Command-line tools
-cd tools/simple_reader
-go run . /tmp/my-db    # View DB in terminal
+yarn dev   # Vite dev server
+yarn build # Production assets
 ```
 
-## 📁 Project Structure
+## Project Layout
 
 ```
 gpaw-explorer/
-├── app.go                    # Backend (Go)
-├── main.go                   # Entry point
-├── wails.json                # Config (uses Yarn)
-├── frontend/                 # Frontend (React + TypeScript)
-│   ├── src/App.tsx          # Main UI
-│   ├── style.css            # Tailwind CSS
-│   ├── package.json
-│   └── yarn.lock            # Yarn lockfile
-├── tools/                    # CLI tools
-│   ├── read_db/
-│   └── simple_reader/
-├── quick-start.sh            # Quick launcher
-└── README.md                 # This file
+├── app.go          # PebbleDB bindings exposed to the frontend
+├── main.go         # Wails bootstrap and window configuration
+├── wails.json      # Wails project configuration
+├── build/          # Packaging assets (icons, manifests)
+├── frontend/       # React + TypeScript source
+│   ├── src/App.tsx
+│   ├── src/main.tsx
+│   ├── src/style.css
+│   └── ...
+└── go.mod          # Go module definition
 ```
 
-## 🎨 Tech Stack
+## Troubleshooting
 
-- **Backend**: Go + Wails v2
-- **Frontend**: React 18 + TypeScript + Tailwind CSS
-- **Build**: Vite
-- **Database**: PebbleDB
-- **Package Manager**: Yarn
-
-## 🐛 Troubleshooting
-
-### Database Locked
-```bash
-# Copy database first
-cp -r /path/to/slot-db /tmp/my-db
-```
-
-### Blank Page
-```bash
-cd frontend
-yarn install
-```
-
-### Port In Use
-```bash
-pkill -f "wails dev"
-```
-
-## 📚 More Documentation
-
-- [QUICK_START.md](QUICK_START.md) - Quick reference
-- [YARN_SETUP.md](YARN_SETUP.md) - Yarn setup details
-- [SOLUTION.md](SOLUTION.md) - Detailed solutions
-- [tools/README.md](tools/README.md) - CLI tools guide
-
-## 💡 Quick Tips
-
-**Running right now?** → Your app is at http://localhost:34115
-
-**Want to see data fast?** → `./quick-start.sh`
-
-**Prefer terminal?** → `cd tools/simple_reader && go run . /tmp/my-db`
-
-**Need to build?** → `wails build`
+- **Database locked** – copy the PebbleDB directory to a temporary location before opening it in the app.
+- **Blank window** – ensure `yarn build` has been run so that `frontend/dist` is populated, then restart `wails dev`.
+- **Port conflicts** – stop any processes using port `5173` before launching the dev server.
 
 ---
 
-**The app is currently running!** 🎉
-
-Check the terminal output - you should see:
-```
-To develop in the browser and call your bound Go methods from Javascript, navigate to: http://localhost:34115
-```
-
-The desktop window should already be open. If not, visit http://localhost:34115 in your browser.
+The application targets macOS and Windows packaging through Wails using the assets in `build/`. Rebuild the frontend (`yarn build`) before producing release binaries with `wails build`.
