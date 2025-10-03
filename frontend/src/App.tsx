@@ -15,6 +15,16 @@ import {
   Pencil,
 } from 'lucide-react';
 import * as backend from '../wailsjs/go/main/App';
+import { main } from '../wailsjs/go/models';
+
+const PAGE_SIZE = 1000;
+
+type PaginationState = {
+  nextCursor: string | null;
+  hasMore: boolean;
+  totalLoaded: number;
+  lastKey?: string | null;
+};
 
 export default function PebbleDBExplorer() {
   const [dbs, setDbs] = useState<string[]>([]);
@@ -37,6 +47,8 @@ export default function PebbleDBExplorer() {
   const [dbStats, setDbStats] = useState<any>(null);
   const [isLoadingKeys, setIsLoadingKeys] = useState(false);
   const [loadProgress, setLoadProgress] = useState(0);
+  const [paginationByDb, setPaginationByDb] = useState<{ [db: string]: PaginationState }>({});
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
 
   const hasWailsBackend = () => Boolean((window as any).go?.main?.App);
 
@@ -58,9 +70,9 @@ export default function PebbleDBExplorer() {
     return {} as Record<string, string>;
   };
 
-  const safeGetKeysByPrefix = async (db: string) => {
+  const safeGetKeysPage = async (db: string, cursor: string | null = null, limit: number = PAGE_SIZE) => {
     if (hasWailsBackend()) {
-      return backend.GetKeysByPrefix(db);
+      return backend.GetKeysByPrefixPage(db, cursor ?? '', limit);
     }
     console.warn('Wails backend not available. Skipping key fetch.');
     return null;
@@ -72,6 +84,58 @@ export default function PebbleDBExplorer() {
     }
     console.warn('Wails backend not available. Returning empty value.');
     return '';
+  };
+
+  const applyPageResult = (db: string, page: main.KeyPageResult, mode: 'replace' | 'append') => {
+    setKeysByDb(prev => {
+      const base = mode === 'append' ? prev[db] || {} : {};
+      const merged: { [prefix: string]: string[] } = {};
+
+      Object.entries(base).forEach(([prefix, keys]) => {
+        merged[prefix] = [...keys];
+      });
+
+      const incoming = (page.prefixes || {}) as Record<string, string[]>;
+      Object.entries(incoming).forEach(([prefix, keys]) => {
+        const existing = merged[prefix] || [];
+        merged[prefix] = mode === 'append' ? [...existing, ...keys] : [...keys];
+      });
+
+      return { ...prev, [db]: merged };
+    });
+
+    setPaginationByDb(prev => {
+      const prevState = mode === 'append' ? prev[db] : undefined;
+      const totalLoaded = (mode === 'append' ? prevState?.totalLoaded || 0 : 0) + (page.count || 0);
+      return {
+        ...prev,
+        [db]: {
+          nextCursor: page.nextCursor ?? null,
+          hasMore: Boolean(page.hasMore && page.nextCursor),
+          totalLoaded,
+          lastKey: page.lastKey ?? null,
+        },
+      };
+    });
+  };
+
+  const fetchPage = async (
+    db: string,
+    cursor: string | null,
+    mode: 'replace' | 'append',
+    options?: { skipApply?: boolean }
+  ) => {
+    const page = await safeGetKeysPage(db, cursor, PAGE_SIZE);
+    if (!page) {
+      return null;
+    }
+    if ((page as any).error) {
+      throw new Error((page as any).error);
+    }
+    if (!options?.skipApply) {
+      applyPageResult(db, page as main.KeyPageResult, mode);
+    }
+    return page as main.KeyPageResult;
   };
 
   const safeAddConnection = async (name: string, path: string) => {
@@ -180,95 +244,107 @@ export default function PebbleDBExplorer() {
   }, []);
 
   useEffect(() => {
-    if (selectedDb && !keysByDb[selectedDb]) {
-      setIsLoadingKeys(true);
-      setLoadProgress(0);
+    if (!selectedDb || keysByDb[selectedDb]) {
+      return;
+    }
 
-      let progressInterval: any = null;
+    let cancelled = false;
+    setIsLoadingKeys(true);
+    setLoadProgress(0);
 
-      // Get database stats first for progress calculation
-      if (hasWailsBackend()) {
-        backend.GetDatabaseStats(selectedDb).then((stats: any) => {
-          console.log('Database stats:', stats);
-          setDbStats(stats);
+    let progressInterval: any = null;
 
-          // Simulate progress (since we can't get real progress from sync call)
-          let progress = 0;
-          progressInterval = setInterval(() => {
-            progress += 3;
-            if (progress >= 90) {
-              if (progressInterval) clearInterval(progressInterval);
-              setLoadProgress(90);
-            } else {
-              setLoadProgress(progress);
+    const clearProgress = () => {
+      if (progressInterval) {
+        clearInterval(progressInterval);
+        progressInterval = null;
+      }
+    };
+
+    const finalizeLoading = () => {
+      clearProgress();
+      if (cancelled) {
+        return;
+      }
+      setLoadProgress(100);
+      setTimeout(() => {
+        if (!cancelled) {
+          setIsLoadingKeys(false);
+        }
+      }, 500);
+    };
+
+    setPaginationByDb(prev => {
+      const updated = { ...prev };
+      delete updated[selectedDb];
+      return updated;
+    });
+
+    if (hasWailsBackend()) {
+      backend.GetDatabaseStats(selectedDb).then((stats: any) => {
+        if (cancelled) return;
+        console.log('Database stats:', stats);
+        setDbStats(stats);
+
+        let progress = 0;
+        progressInterval = setInterval(() => {
+          progress += 3;
+          if (progress >= 90) {
+            clearProgress();
+            setLoadProgress(90);
+          } else {
+            setLoadProgress(progress);
+          }
+        }, 150);
+
+        const startTime = Date.now();
+        console.log(`Starting to load keys for database: ${selectedDb}`);
+
+        fetchPage(selectedDb, null, 'replace', { skipApply: true })
+          .then(page => {
+            if (cancelled) return;
+            clearProgress();
+
+            if (page) {
+              applyPageResult(selectedDb, page, 'replace');
+              const prefixCount = Object.keys(page.prefixes || {}).length;
+              console.log(`✓ Loaded ${page.count} keys in ${prefixCount} prefixes in ${Date.now() - startTime}ms`);
             }
-          }, 150);
 
-          // Now load keys with progress updates
-          const startTime = Date.now();
-          console.log(`Starting to load keys for database: ${selectedDb}`);
-
-          safeGetKeysByPrefix(selectedDb).then((prefixes: { [prefix: string]: string[] } | null) => {
-            console.log('GetKeysByPrefix returned:', prefixes);
-            console.log('Type of prefixes:', typeof prefixes);
-            console.log('Is array?', Array.isArray(prefixes));
-            console.log('Is null?', prefixes === null);
-            console.log('Is undefined?', prefixes === undefined);
-
-            if (progressInterval) clearInterval(progressInterval);
-
-            if (prefixes && typeof prefixes === 'object' && !Array.isArray(prefixes)) {
-              const prefixCount = Object.keys(prefixes).length;
-              const totalKeys = Object.values(prefixes).reduce((sum, arr) => sum + arr.length, 0);
-              console.log(`✓ Loaded ${totalKeys} keys in ${prefixCount} prefixes in ${Date.now() - startTime}ms`);
-              console.log('Sample prefixes:', Object.keys(prefixes).slice(0, 5));
-
-              setKeysByDb(prev => {
-                const updated = { ...prev, [selectedDb]: prefixes };
-                console.log('Updated keysByDb:', updated);
-                return updated;
-              });
-              setLoadProgress(100);
-
-              // Keep at 100% for a moment before hiding
-              setTimeout(() => {
-                setIsLoadingKeys(false);
-              }, 500);
-            } else {
-              console.error('❌ Invalid prefixes data:', prefixes);
-              console.error('Expected object, got:', typeof prefixes);
-              setIsLoadingKeys(false);
-            }
-          }).catch((err) => {
-            if (progressInterval) clearInterval(progressInterval);
+            finalizeLoading();
+          })
+          .catch(err => {
+            clearProgress();
+            if (cancelled) return;
             console.error('❌ Error loading keys:', err);
-            console.error('Error stack:', err?.stack);
             setIsLoadingKeys(false);
           });
-        }).catch((err) => {
-          console.error('Error getting stats:', err);
-          setIsLoadingKeys(false);
-        });
-      } else {
-        // No backend, just load
-        safeGetKeysByPrefix(selectedDb).then((prefixes: { [prefix: string]: string[] } | null) => {
-          if (prefixes) {
-            console.log('Keys loaded (no backend):', prefixes);
-            setKeysByDb(prev => ({ ...prev, [selectedDb]: prefixes }));
+      }).catch(err => {
+        if (cancelled) return;
+        console.error('Error getting stats:', err);
+        setIsLoadingKeys(false);
+      });
+    } else {
+      fetchPage(selectedDb, null, 'replace', { skipApply: true })
+        .then(page => {
+          if (cancelled) return;
+          if (page) {
+            applyPageResult(selectedDb, page, 'replace');
           }
           setIsLoadingKeys(false);
-        }).catch((err) => {
+        })
+        .catch(err => {
+          if (cancelled) return;
           console.error('Error loading keys:', err);
           setIsLoadingKeys(false);
         });
-      }
-
-      // Cleanup on unmount
-      return () => {
-        if (progressInterval) clearInterval(progressInterval);
-      };
     }
-  }, [selectedDb]);
+
+    return () => {
+      cancelled = true;
+      clearProgress();
+    };
+  }, [selectedDb, keysByDb]);
 
   useEffect(() => {
     if (selectedDb && selectedKey) {
@@ -304,6 +380,15 @@ export default function PebbleDBExplorer() {
     return allKeys.filter(key => key.toLowerCase().includes(searchTerm.toLowerCase()));
   };
 
+  const getLoadedKeyCount = (db: string) => {
+    const pagination = paginationByDb[db];
+    if (pagination) {
+      return pagination.totalLoaded;
+    }
+    const prefixes = keysByDb[db] || {};
+    return Object.keys(prefixes).reduce((sum, p) => sum + (prefixes[p]?.length || 0), 0);
+  };
+
   const toggleExpand = (prefix: string) => {
     const newExpanded = new Set(expandedKeys);
     if (newExpanded.has(prefix)) {
@@ -315,12 +400,34 @@ export default function PebbleDBExplorer() {
   };
 
   const handleRefresh = () => {
-    if (selectedDb) {
-      safeGetKeysByPrefix(selectedDb).then((prefixes: { [prefix: string]: string[] } | null) => {
-        if (prefixes) {
-          setKeysByDb(prev => ({ ...prev, [selectedDb]: prefixes }));
-        }
-      });
+    if (!selectedDb) return;
+    setSelectedKey(null);
+    setKeysByDb(prev => {
+      const updated = { ...prev };
+      delete updated[selectedDb];
+      return updated;
+    });
+    setPaginationByDb(prev => {
+      const updated = { ...prev };
+      delete updated[selectedDb];
+      return updated;
+    });
+  };
+
+  const loadMoreKeys = async () => {
+    if (!selectedDb) return;
+    const pagination = paginationByDb[selectedDb];
+    if (!pagination || !pagination.hasMore || !pagination.nextCursor) {
+      return;
+    }
+
+    setIsLoadingMore(true);
+    try {
+      await fetchPage(selectedDb, pagination.nextCursor, 'append');
+    } catch (err) {
+      console.error('Error loading more keys:', err);
+    } finally {
+      setIsLoadingMore(false);
     }
   };
 
@@ -370,7 +477,7 @@ export default function PebbleDBExplorer() {
               <Database className="w-4 h-4" />
               <span className="flex-1 truncate">{db}</span>
               <span className="text-xs text-slate-300">
-                {Object.keys(keysByDb[db] || {}).reduce((sum, p) => sum + (keysByDb[db][p]?.length || 0), 0)}
+                {getLoadedKeyCount(db).toLocaleString()}
               </span>
               <button
                 onClick={(e) => {
@@ -432,9 +539,11 @@ export default function PebbleDBExplorer() {
           <div className="flex w-80 flex-col border-r border-slate-200 bg-white">
             <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3 text-sm font-medium text-slate-600">
               <span>
-                Keys ({viewMode === 'tree'
-                  ? Object.keys(getKeysByPrefix()).reduce((sum, p) => sum + getKeysByPrefix()[p].length, 0)
-                  : filteredKeys().length})
+                Keys ({selectedDb
+                  ? viewMode === 'tree'
+                    ? getLoadedKeyCount(selectedDb).toLocaleString()
+                    : filteredKeys().length.toLocaleString()
+                  : '0'})
               </span>
               <div className="flex gap-2">
                 <button
@@ -469,31 +578,13 @@ export default function PebbleDBExplorer() {
                   {dbStats.error && <div className="text-red-600">Error: {dbStats.error}</div>}
                   {selectedDb && keysByDb[selectedDb] && (
                     <div className="text-green-700 mt-1">
-                      ✓ Loaded: {Object.keys(keysByDb[selectedDb]).length} prefixes
+                      ✓ Loaded {getLoadedKeyCount(selectedDb).toLocaleString()} keys across {Object.keys(keysByDb[selectedDb]).length} prefixes
+                      {paginationByDb[selectedDb]?.hasMore ? ' (more available)' : ''}
                     </div>
                   )}
                 </div>
               )}
-              {isLoadingKeys && (
-                <div className="mb-3 rounded-lg bg-blue-50 border border-blue-200 p-4">
-                  <div className="flex items-center gap-3 mb-2">
-                    <svg className="animate-spin h-5 w-5 text-blue-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                    </svg>
-                    <span className="text-sm font-medium text-blue-900">
-                      Loading keys... {dbStats?.totalKeys ? `(~${dbStats.totalKeys.toLocaleString()} total)` : ''}
-                    </span>
-                  </div>
-                  <div className="w-full bg-blue-200 rounded-full h-2">
-                    <div
-                      className="bg-blue-600 h-2 rounded-full transition-all duration-300"
-                      style={{ width: `${loadProgress}%` }}
-                    ></div>
-                  </div>
-                  <div className="text-xs text-blue-700 mt-1 text-right">{loadProgress}%</div>
-                </div>
-              )}
+             
               {!isLoadingKeys && selectedDb && Object.keys(getKeysByPrefix()).length === 0 && (
                 <div className="mb-3 rounded-lg bg-yellow-50 border border-yellow-200 p-4 text-center">
                   <p className="text-sm text-yellow-800">No keys found in this database.</p>
@@ -536,20 +627,39 @@ export default function PebbleDBExplorer() {
                       )}
                     </div>
                   ))
-                : filteredKeys().map(key => (
-                    <div
-                      key={key}
-                      onClick={() => setSelectedKey(key)}
-                      className={`flex cursor-pointer items-center gap-2 rounded-md px-3 py-2 text-sm transition ${
-                        selectedKey === key
-                          ? 'bg-sky-100 text-sky-800'
-                          : 'text-slate-600 hover:bg-slate-100'
-                      }`}
-                    >
-                      <Key className="h-4 w-4" />
-                      <span className="truncate">{key}</span>
-                    </div>
-                  ))}
+                : (
+                    <>
+                      {filteredKeys().map(key => (
+                        <div
+                          key={key}
+                          onClick={() => setSelectedKey(key)}
+                          className={`flex cursor-pointer items-center gap-2 rounded-md px-3 py-2 text-sm transition ${
+                            selectedKey === key
+                              ? 'bg-sky-100 text-sky-800'
+                              : 'text-slate-600 hover:bg-slate-100'
+                          }`}
+                        >
+                          <Key className="h-4 w-4" />
+                          <span className="truncate">{key}</span>
+                        </div>
+                      ))}
+
+                      {selectedDb && paginationByDb[selectedDb]?.hasMore && (
+                        <div className="pt-2">
+                          <button
+                            onClick={loadMoreKeys}
+                            disabled={isLoadingMore}
+                            className="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-60"
+                          >
+                            {isLoadingMore ? 'Loading more...' : 'Load more keys'}
+                          </button>
+                          <div className="mt-1 text-xs text-slate-500">
+                            Showing {getLoadedKeyCount(selectedDb).toLocaleString()} keys so far
+                          </div>
+                        </div>
+                      )}
+                    </>
+                  )}
             </div>
           </div>
 
@@ -632,21 +742,15 @@ export default function PebbleDBExplorer() {
                   </div>
                 </div>
 
-                {/* Value Display */}
-                <div className="flex-1 overflow-auto p-6">
-                  {valueMetadata?.isTruncated && (
-                    <div className="mb-4 rounded-lg bg-amber-50 border border-amber-200 p-4">
-                      <div className="flex items-start gap-3">
-                        <svg className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" fill="currentColor" viewBox="0 0 20 20">
-                          <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
-                        </svg>
-                        <div className="flex-1">
-                          <h4 className="text-sm font-semibold text-amber-900 mb-1">Large Value Detected</h4>
-                          <p className="text-sm text-amber-800">{valueMetadata.truncatedMsg}</p>
-                        </div>
-                      </div>
-                    </div>
-                  )}
+                {/* Content */}
+                <div className="flex-1 overflow-auto bg-[#0F172A] p-6">
+                  <div className="flex justify-between text-xs text-slate-400 mb-2">
+                    <span>Preview</span>
+                    {valueMetadata?.isTruncated && (
+                      <span className="text-amber-400">Truncated preview (larger value hidden)</span>
+                    )}
+                  </div>
+
                   <div className="rounded-lg bg-[#19334D] p-4 shadow-lg h-full min-h-[400px]">
                     <pre className="text-sm font-mono text-emerald-300 whitespace-pre-wrap break-all">
                       {(() => {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/hex"
@@ -22,6 +23,8 @@ var dbs syncmap.Map         // name (string) -> *pebble.DB
 const (
 	defaultMaxTotalKeys     = 5000
 	defaultMaxKeysPerPrefix = 500
+	defaultPageLimit        = 1000
+	maxPageLimit            = 5000
 )
 
 func getEnvInt(key string, defaultValue int) int {
@@ -215,6 +218,15 @@ func (a *App) GetKeysByPrefix(dbName string) map[string][]string {
 	return prefixes
 }
 
+type KeyPageResult struct {
+	Prefixes   map[string][]string `json:"prefixes"`
+	Count      int                 `json:"count"`
+	HasMore    bool                `json:"hasMore"`
+	NextCursor string              `json:"nextCursor,omitempty"`
+	LastKey    string              `json:"lastKey,omitempty"`
+	Error      string              `json:"error,omitempty"`
+}
+
 // GetKeysChunked returns keys in chunks with progress updates
 func (a *App) GetKeysChunked(dbName string, chunkSize int) map[string]interface{} {
 	dbAny, ok := dbs.Load(dbName)
@@ -331,6 +343,116 @@ func (a *App) GetKeysWithPagination(dbName string, offset int, limit int) map[st
 	result["offset"] = offset
 	result["limit"] = limit
 	result["count"] = collected
+
+	return result
+}
+
+func (a *App) GetKeysByPrefixPage(dbName string, cursor string, limit int) *KeyPageResult {
+	result := &KeyPageResult{
+		Prefixes: make(map[string][]string),
+	}
+
+	dbAny, ok := dbs.Load(dbName)
+	if !ok {
+		result.Error = "database not found"
+		return result
+	}
+	db := dbAny.(*pebble.DB)
+
+	if limit <= 0 {
+		limit = defaultPageLimit
+	} else if limit > maxPageLimit {
+		limit = maxPageLimit
+	}
+
+	iter, err := db.NewIter(&pebble.IterOptions{})
+	if err != nil {
+		result.Error = fmt.Sprintf("failed to create iterator: %v", err)
+		return result
+	}
+	defer iter.Close()
+
+	if cursor == "" {
+		if !iter.First() {
+			if err := iter.Error(); err != nil {
+				result.Error = fmt.Sprintf("iterator error: %v", err)
+			}
+			return result
+		}
+	} else {
+		cursorBytes, err := base64.StdEncoding.DecodeString(cursor)
+		if err != nil {
+			result.Error = "invalid cursor"
+			return result
+		}
+		if !iter.SeekGE(cursorBytes) {
+			if err := iter.Error(); err != nil {
+				result.Error = fmt.Sprintf("iterator error: %v", err)
+			}
+			return result
+		}
+		if bytes.Equal(iter.Key(), cursorBytes) {
+			if !iter.Next() {
+				if err := iter.Error(); err != nil {
+					result.Error = fmt.Sprintf("iterator error: %v", err)
+				}
+				return result
+			}
+		}
+	}
+
+	const initialCapacity = 100
+	count := 0
+	var lastKeyRaw []byte
+	lastKeyDisplay := ""
+
+	for iter.Valid() && count < limit {
+		keyBytes := append([]byte(nil), iter.Key()...)
+		keyDisplay := formatKeyForDisplay(keyBytes)
+
+		colonIdx := strings.IndexByte(keyDisplay, ':')
+		var prefix string
+
+		if colonIdx > 0 {
+			prefix = keyDisplay[:colonIdx]
+		} else if strings.HasPrefix(keyDisplay, "0x") && len(keyDisplay) > 6 {
+			prefix = keyDisplay[:6]
+		} else if len(keyDisplay) > 4 {
+			prefix = keyDisplay[:4]
+		} else {
+			prefix = "misc"
+		}
+
+		keysForPrefix, exists := result.Prefixes[prefix]
+		if !exists {
+			keysForPrefix = make([]string, 0, initialCapacity)
+		}
+
+		keysForPrefix = append(keysForPrefix, keyDisplay)
+		result.Prefixes[prefix] = keysForPrefix
+
+		lastKeyRaw = keyBytes
+		lastKeyDisplay = keyDisplay
+		count++
+
+		if !iter.Next() {
+			break
+		}
+	}
+
+	if err := iter.Error(); err != nil {
+		result.Error = fmt.Sprintf("iterator error: %v", err)
+		return result
+	}
+
+	result.Count = count
+	result.LastKey = lastKeyDisplay
+	if iter.Valid() {
+		result.HasMore = true
+	}
+	if result.HasMore && lastKeyRaw != nil {
+		result.NextCursor = base64.StdEncoding.EncodeToString(lastKeyRaw)
+	}
 
 	return result
 }
