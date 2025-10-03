@@ -28,12 +28,15 @@ export default function PebbleDBExplorer() {
   const [valueMetadata, setValueMetadata] = useState<any>(null);
   const [viewFormat, setViewFormat] = useState<'auto' | 'hex' | 'base64' | 'string'>('auto');
   const [isAddingConnection, setIsAddingConnection] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);
   const [connectionName, setConnectionName] = useState('');
   const [connectionPath, setConnectionPath] = useState('');
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [connectionPaths, setConnectionPaths] = useState<Record<string, string>>({});
   const [connectionToEdit, setConnectionToEdit] = useState<string | null>(null);
   const [dbStats, setDbStats] = useState<any>(null);
+  const [isLoadingKeys, setIsLoadingKeys] = useState(false);
+  const [loadProgress, setLoadProgress] = useState(0);
 
   const hasWailsBackend = () => Boolean((window as any).go?.main?.App);
 
@@ -178,20 +181,92 @@ export default function PebbleDBExplorer() {
 
   useEffect(() => {
     if (selectedDb && !keysByDb[selectedDb]) {
-      // Get database stats for debugging
+      setIsLoadingKeys(true);
+      setLoadProgress(0);
+
+      let progressInterval: any = null;
+
+      // Get database stats first for progress calculation
       if (hasWailsBackend()) {
         backend.GetDatabaseStats(selectedDb).then((stats: any) => {
           console.log('Database stats:', stats);
           setDbStats(stats);
+
+          // Simulate progress (since we can't get real progress from sync call)
+          let progress = 0;
+          progressInterval = setInterval(() => {
+            progress += 3;
+            if (progress >= 90) {
+              if (progressInterval) clearInterval(progressInterval);
+              setLoadProgress(90);
+            } else {
+              setLoadProgress(progress);
+            }
+          }, 150);
+
+          // Now load keys with progress updates
+          const startTime = Date.now();
+          console.log(`Starting to load keys for database: ${selectedDb}`);
+
+          safeGetKeysByPrefix(selectedDb).then((prefixes: { [prefix: string]: string[] } | null) => {
+            console.log('GetKeysByPrefix returned:', prefixes);
+            console.log('Type of prefixes:', typeof prefixes);
+            console.log('Is array?', Array.isArray(prefixes));
+            console.log('Is null?', prefixes === null);
+            console.log('Is undefined?', prefixes === undefined);
+
+            if (progressInterval) clearInterval(progressInterval);
+
+            if (prefixes && typeof prefixes === 'object' && !Array.isArray(prefixes)) {
+              const prefixCount = Object.keys(prefixes).length;
+              const totalKeys = Object.values(prefixes).reduce((sum, arr) => sum + arr.length, 0);
+              console.log(`✓ Loaded ${totalKeys} keys in ${prefixCount} prefixes in ${Date.now() - startTime}ms`);
+              console.log('Sample prefixes:', Object.keys(prefixes).slice(0, 5));
+
+              setKeysByDb(prev => {
+                const updated = { ...prev, [selectedDb]: prefixes };
+                console.log('Updated keysByDb:', updated);
+                return updated;
+              });
+              setLoadProgress(100);
+
+              // Keep at 100% for a moment before hiding
+              setTimeout(() => {
+                setIsLoadingKeys(false);
+              }, 500);
+            } else {
+              console.error('❌ Invalid prefixes data:', prefixes);
+              console.error('Expected object, got:', typeof prefixes);
+              setIsLoadingKeys(false);
+            }
+          }).catch((err) => {
+            if (progressInterval) clearInterval(progressInterval);
+            console.error('❌ Error loading keys:', err);
+            console.error('Error stack:', err?.stack);
+            setIsLoadingKeys(false);
+          });
+        }).catch((err) => {
+          console.error('Error getting stats:', err);
+          setIsLoadingKeys(false);
+        });
+      } else {
+        // No backend, just load
+        safeGetKeysByPrefix(selectedDb).then((prefixes: { [prefix: string]: string[] } | null) => {
+          if (prefixes) {
+            console.log('Keys loaded (no backend):', prefixes);
+            setKeysByDb(prev => ({ ...prev, [selectedDb]: prefixes }));
+          }
+          setIsLoadingKeys(false);
+        }).catch((err) => {
+          console.error('Error loading keys:', err);
+          setIsLoadingKeys(false);
         });
       }
 
-      safeGetKeysByPrefix(selectedDb).then((prefixes: { [prefix: string]: string[] } | null) => {
-        if (prefixes) {
-          console.log('Keys by prefix:', prefixes);
-          setKeysByDb(prev => ({ ...prev, [selectedDb]: prefixes }));
-        }
-      });
+      // Cleanup on unmount
+      return () => {
+        if (progressInterval) clearInterval(progressInterval);
+      };
     }
   }, [selectedDb]);
 
@@ -246,6 +321,20 @@ export default function PebbleDBExplorer() {
           setKeysByDb(prev => ({ ...prev, [selectedDb]: prefixes }));
         }
       });
+    }
+  };
+
+  const handleExport = async () => {
+    if (!selectedDb || !selectedKey || !hasWailsBackend()) return;
+
+    setIsExporting(true);
+    try {
+      await backend.ExportValue(selectedDb, selectedKey);
+      // Success - file saved
+    } catch (err: any) {
+      alert(`Export failed: ${err?.message || String(err)}`);
+    } finally {
+      setIsExporting(false);
     }
   };
 
@@ -372,12 +461,43 @@ export default function PebbleDBExplorer() {
             </div>
 
             <div className="flex-1 overflow-y-auto p-3 space-y-2">
-              {dbStats && selectedDb && (
+              {dbStats && selectedDb && !isLoadingKeys && (
                 <div className="mb-3 rounded-lg bg-blue-50 p-3 text-xs">
                   <div className="font-semibold text-blue-900 mb-1">Database Stats:</div>
-                  <div className="text-blue-700">Total Keys: {dbStats.totalKeys || 0}</div>
+                  <div className="text-blue-700">Total Keys: {dbStats.totalKeys?.toLocaleString() || 0}</div>
                   {dbStats.firstKey && <div className="text-blue-700 truncate">First: {dbStats.firstKey}</div>}
                   {dbStats.error && <div className="text-red-600">Error: {dbStats.error}</div>}
+                  {selectedDb && keysByDb[selectedDb] && (
+                    <div className="text-green-700 mt-1">
+                      ✓ Loaded: {Object.keys(keysByDb[selectedDb]).length} prefixes
+                    </div>
+                  )}
+                </div>
+              )}
+              {isLoadingKeys && (
+                <div className="mb-3 rounded-lg bg-blue-50 border border-blue-200 p-4">
+                  <div className="flex items-center gap-3 mb-2">
+                    <svg className="animate-spin h-5 w-5 text-blue-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    <span className="text-sm font-medium text-blue-900">
+                      Loading keys... {dbStats?.totalKeys ? `(~${dbStats.totalKeys.toLocaleString()} total)` : ''}
+                    </span>
+                  </div>
+                  <div className="w-full bg-blue-200 rounded-full h-2">
+                    <div
+                      className="bg-blue-600 h-2 rounded-full transition-all duration-300"
+                      style={{ width: `${loadProgress}%` }}
+                    ></div>
+                  </div>
+                  <div className="text-xs text-blue-700 mt-1 text-right">{loadProgress}%</div>
+                </div>
+              )}
+              {!isLoadingKeys && selectedDb && Object.keys(getKeysByPrefix()).length === 0 && (
+                <div className="mb-3 rounded-lg bg-yellow-50 border border-yellow-200 p-4 text-center">
+                  <p className="text-sm text-yellow-800">No keys found in this database.</p>
+                  <p className="text-xs text-yellow-600 mt-1">Check console for errors or try refreshing.</p>
                 </div>
               )}
               {viewMode === 'tree'
@@ -455,9 +575,13 @@ export default function PebbleDBExplorer() {
                       )}
                     </div>
                     <div className="flex-none flex gap-2">
-                      <button className="inline-flex items-center gap-2 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm transition hover:bg-slate-100">
+                      <button
+                        onClick={handleExport}
+                        disabled={isExporting}
+                        className="inline-flex items-center gap-2 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm transition hover:bg-slate-100 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
                         <Download className="h-4 w-4" />
-                        Export
+                        {isExporting ? 'Exporting...' : 'Export'}
                       </button>
                       <button className="inline-flex items-center gap-2 rounded-md border border-rose-400 bg-rose-50 px-3 py-1.5 text-sm text-rose-600 transition hover:bg-rose-100">
                         <Trash2 className="h-4 w-4" />
@@ -510,6 +634,19 @@ export default function PebbleDBExplorer() {
 
                 {/* Value Display */}
                 <div className="flex-1 overflow-auto p-6">
+                  {valueMetadata?.isTruncated && (
+                    <div className="mb-4 rounded-lg bg-amber-50 border border-amber-200 p-4">
+                      <div className="flex items-start gap-3">
+                        <svg className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" fill="currentColor" viewBox="0 0 20 20">
+                          <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
+                        </svg>
+                        <div className="flex-1">
+                          <h4 className="text-sm font-semibold text-amber-900 mb-1">Large Value Detected</h4>
+                          <p className="text-sm text-amber-800">{valueMetadata.truncatedMsg}</p>
+                        </div>
+                      </div>
+                    </div>
+                  )}
                   <div className="rounded-lg bg-[#19334D] p-4 shadow-lg h-full min-h-[400px]">
                     <pre className="text-sm font-mono text-emerald-300 whitespace-pre-wrap break-all">
                       {(() => {
