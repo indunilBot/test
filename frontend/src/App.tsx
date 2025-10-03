@@ -25,12 +25,15 @@ export default function PebbleDBExplorer() {
   const [expandedKeys, setExpandedKeys] = useState<Set<string>>(new Set());
   const [keysByDb, setKeysByDb] = useState<{ [db: string]: { [prefix: string]: string[] } }>({});
   const [values, setValues] = useState<{ [cacheKey: string]: string }>({});
+  const [valueMetadata, setValueMetadata] = useState<any>(null);
+  const [viewFormat, setViewFormat] = useState<'auto' | 'hex' | 'base64' | 'string'>('auto');
   const [isAddingConnection, setIsAddingConnection] = useState(false);
   const [connectionName, setConnectionName] = useState('');
   const [connectionPath, setConnectionPath] = useState('');
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [connectionPaths, setConnectionPaths] = useState<Record<string, string>>({});
   const [connectionToEdit, setConnectionToEdit] = useState<string | null>(null);
+  const [dbStats, setDbStats] = useState<any>(null);
 
   const hasWailsBackend = () => Boolean((window as any).go?.main?.App);
 
@@ -108,15 +111,18 @@ export default function PebbleDBExplorer() {
   };
 
   const handleBrowseForPath = async () => {
-    const runtime = (window as any).runtime;
-    if (runtime?.OpenDirectoryDialog) {
-      const selected = await runtime.OpenDirectoryDialog({ title: 'Select PebbleDB Directory' });
+    if (!hasWailsBackend()) {
+      setConnectionError('Directory picker is not available in this environment. Please paste the path manually.');
+      return;
+    }
+    try {
+      const selected = await backend.OpenDirectoryDialog();
       if (selected) {
         setConnectionPath(selected);
         setConnectionError(null);
       }
-    } else {
-      setConnectionError('Directory picker is not available in this environment. Please paste the path manually.');
+    } catch (err: any) {
+      setConnectionError(err?.message ?? 'Failed to open directory picker');
     }
   };
 
@@ -172,8 +178,17 @@ export default function PebbleDBExplorer() {
 
   useEffect(() => {
     if (selectedDb && !keysByDb[selectedDb]) {
+      // Get database stats for debugging
+      if (hasWailsBackend()) {
+        backend.GetDatabaseStats(selectedDb).then((stats: any) => {
+          console.log('Database stats:', stats);
+          setDbStats(stats);
+        });
+      }
+
       safeGetKeysByPrefix(selectedDb).then((prefixes: { [prefix: string]: string[] } | null) => {
         if (prefixes) {
+          console.log('Keys by prefix:', prefixes);
           setKeysByDb(prev => ({ ...prev, [selectedDb]: prefixes }));
         }
       });
@@ -184,11 +199,21 @@ export default function PebbleDBExplorer() {
     if (selectedDb && selectedKey) {
       const cacheKey = `${selectedDb}_${selectedKey}`;
       if (!values[cacheKey]) {
-        safeGetValue(selectedDb, selectedKey).then((val: string) => {
-          if (val) {
-            setValues(prev => ({ ...prev, [cacheKey]: val }));
-          }
-        });
+        // Get value with metadata for better display
+        if (hasWailsBackend()) {
+          backend.GetValueWithMetadata(selectedDb, selectedKey).then((metadata: any) => {
+            if (metadata) {
+              setValueMetadata(metadata);
+              setValues(prev => ({ ...prev, [cacheKey]: metadata.value }));
+            }
+          });
+        } else {
+          safeGetValue(selectedDb, selectedKey).then((val: string) => {
+            if (val) {
+              setValues(prev => ({ ...prev, [cacheKey]: val }));
+            }
+          });
+        }
       }
     }
   }, [selectedDb, selectedKey]);
@@ -347,6 +372,14 @@ export default function PebbleDBExplorer() {
             </div>
 
             <div className="flex-1 overflow-y-auto p-3 space-y-2">
+              {dbStats && selectedDb && (
+                <div className="mb-3 rounded-lg bg-blue-50 p-3 text-xs">
+                  <div className="font-semibold text-blue-900 mb-1">Database Stats:</div>
+                  <div className="text-blue-700">Total Keys: {dbStats.totalKeys || 0}</div>
+                  {dbStats.firstKey && <div className="text-blue-700 truncate">First: {dbStats.firstKey}</div>}
+                  {dbStats.error && <div className="text-red-600">Error: {dbStats.error}</div>}
+                </div>
+              )}
               {viewMode === 'tree'
                 ? Object.entries(getKeysByPrefix()).map(([prefix, keys]) => (
                     <div key={prefix} className="space-y-1">
@@ -400,79 +433,126 @@ export default function PebbleDBExplorer() {
             </div>
           </div>
 
-          <div className="flex-1 overflow-y-auto bg-white">
+          <div className="flex-1 overflow-hidden bg-slate-50 flex flex-col">
             {selectedKey ? (
-              <div className="p-6 space-y-6">
-                <div className="flex items-center justify-between border-b border-slate-200 pb-4">
-                  <h2 className="text-xl font-semibold text-slate-900">{selectedKey}</h2>
-                  <div className="flex gap-2">
-                    <button className="inline-flex items-center gap-2 rounded-md border border-slate-300 bg-white px-3 py-1 text-sm transition hover:bg-slate-100">
-                      <Download className="h-4 w-4" />
-                      Export
-                    </button>
-                    <button className="inline-flex items-center gap-2 rounded-md border border-rose-400 bg-rose-50 px-3 py-1 text-sm text-rose-600 transition hover:bg-rose-100">
-                      <Trash2 className="h-4 w-4" />
-                      Delete
-                    </button>
+              <div className="flex flex-col h-full">
+                {/* Header */}
+                <div className="flex-none bg-white border-b border-slate-200 px-6 py-4">
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="flex-1 min-w-0">
+                      <h2 className="text-lg font-semibold text-slate-900 break-all">{selectedKey}</h2>
+                      {valueMetadata && (
+                        <div className="flex items-center gap-4 mt-2 text-sm text-slate-600">
+                          <span className="flex items-center gap-1">
+                            <span className="text-slate-500">Type:</span>
+                            <span className="font-mono text-sky-700 capitalize">{valueMetadata.type}</span>
+                          </span>
+                          <span className="flex items-center gap-1">
+                            <span className="text-slate-500">Size:</span>
+                            <span className="font-mono">{valueMetadata.size.toLocaleString()} bytes</span>
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                    <div className="flex-none flex gap-2">
+                      <button className="inline-flex items-center gap-2 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm transition hover:bg-slate-100">
+                        <Download className="h-4 w-4" />
+                        Export
+                      </button>
+                      <button className="inline-flex items-center gap-2 rounded-md border border-rose-400 bg-rose-50 px-3 py-1.5 text-sm text-rose-600 transition hover:bg-rose-100">
+                        <Trash2 className="h-4 w-4" />
+                        Delete
+                      </button>
+                    </div>
                   </div>
                 </div>
-                <div className="flex flex-wrap items-center gap-6 text-sm text-slate-600">
-                  {(() => {
-                    const cacheKey = `${selectedDb}_${selectedKey}`;
-                    const rawValue = values[cacheKey] || '';
-                    let type = 'Unknown';
-                    let size = '0 bytes';
-                    if (rawValue) {
-                      size = `${rawValue.length} bytes`;
-                      try {
-                        JSON.parse(rawValue);
-                        type = 'Object';
-                      } catch {
-                        type = 'String';
-                      }
-                    }
-                    return (
-                      <>
-                        <span>
-                          Type: <span className="font-mono text-sky-700">{type}</span>
-                        </span>
-                        <span>
-                          Size: <span className="font-mono">{size}</span>
-                        </span>
-                      </>
-                    );
-                  })()}
+
+                {/* Format Selector */}
+                <div className="flex-none bg-white border-b border-slate-200 px-6 py-3">
+                  <div className="flex items-center gap-3">
+                    <span className="text-sm font-medium text-slate-700">View as:</span>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => setViewFormat('auto')}
+                        className={`rounded-md px-3 py-1.5 text-xs font-semibold transition ${
+                          viewFormat === 'auto' ? 'bg-sky-100 text-sky-800 ring-1 ring-sky-300' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                        }`}
+                      >
+                        Auto
+                      </button>
+                      <button
+                        onClick={() => setViewFormat('string')}
+                        className={`rounded-md px-3 py-1.5 text-xs font-semibold transition ${
+                          viewFormat === 'string' ? 'bg-sky-100 text-sky-800 ring-1 ring-sky-300' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                        }`}
+                      >
+                        String
+                      </button>
+                      <button
+                        onClick={() => setViewFormat('hex')}
+                        className={`rounded-md px-3 py-1.5 text-xs font-semibold transition ${
+                          viewFormat === 'hex' ? 'bg-sky-100 text-sky-800 ring-1 ring-sky-300' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                        }`}
+                      >
+                        Hex
+                      </button>
+                      <button
+                        onClick={() => setViewFormat('base64')}
+                        className={`rounded-md px-3 py-1.5 text-xs font-semibold transition ${
+                          viewFormat === 'base64' ? 'bg-sky-100 text-sky-800 ring-1 ring-sky-300' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                        }`}
+                      >
+                        Base64
+                      </button>
+                    </div>
+                  </div>
                 </div>
-                <div className="rounded-xl bg-[#19334D] p-4 shadow-inner">
-                  <pre className="overflow-auto text-sm font-mono text-emerald-300">
-                    {(() => {
-                      const cacheKey = `${selectedDb}_${selectedKey}`;
-                      const rawValue = values[cacheKey];
-                      if (!rawValue) return 'Loading...';
-                      try {
-                        const parsed = JSON.parse(rawValue);
-                        return JSON.stringify(parsed, null, 2);
-                      } catch {
-                        return rawValue;
-                      }
-                    })()}
-                  </pre>
-                </div>
-                <div className="flex gap-3">
-                  <button className="inline-flex items-center gap-2 rounded-lg bg-[#003C67] px-4 py-2 text-sm font-medium text-white transition hover:opacity-90">
-                    Save Changes
-                  </button>
-                  <button className="inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-100">
-                    Cancel
-                  </button>
+
+                {/* Value Display */}
+                <div className="flex-1 overflow-auto p-6">
+                  <div className="rounded-lg bg-[#19334D] p-4 shadow-lg h-full min-h-[400px]">
+                    <pre className="text-sm font-mono text-emerald-300 whitespace-pre-wrap break-all">
+                      {(() => {
+                        if (!valueMetadata) return 'Loading...';
+
+                        // Determine which format to display
+                        let displayValue = '';
+                        switch (viewFormat) {
+                          case 'hex':
+                            displayValue = valueMetadata.valueHex;
+                            break;
+                          case 'base64':
+                            displayValue = valueMetadata.valueBase64;
+                            break;
+                          case 'string':
+                            displayValue = valueMetadata.value;
+                            break;
+                          case 'auto':
+                          default:
+                            // Auto-detect best format
+                            if (valueMetadata.type === 'json') {
+                              displayValue = valueMetadata.value; // Already pretty-printed
+                            } else if (valueMetadata.type === 'string') {
+                              displayValue = valueMetadata.value;
+                            } else {
+                              // Binary data - show hex
+                              displayValue = valueMetadata.valueHex;
+                            }
+                            break;
+                        }
+
+                        return displayValue;
+                      })()}
+                    </pre>
+                  </div>
                 </div>
               </div>
             ) : (
               <div className="flex h-full items-center justify-center text-slate-400">
-                <div className="text-center space-y-2">
-                  <Database className="mx-auto h-16 w-16 opacity-50" />
-                  <p className="text-lg font-medium">Select a key to view its value</p>
-                  <p className="text-sm">Choose from the list on the left</p>
+                <div className="text-center space-y-3">
+                  <Database className="mx-auto h-20 w-20 opacity-30" />
+                  <p className="text-lg font-medium text-slate-500">Select a key to view its value</p>
+                  <p className="text-sm text-slate-400">Choose from the list on the left</p>
                 </div>
               </div>
             )}
