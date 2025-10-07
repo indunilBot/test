@@ -10,12 +10,18 @@ import {
   ChevronDown,
   Settings,
   Key,
-  Filter,
   Download,
   Pencil,
 } from 'lucide-react';
 import * as backend from '../wailsjs/go/main/App';
 import { main } from '../wailsjs/go/models';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from './components/ui/select';
 
 const PAGE_SIZE = 1000;
 
@@ -79,14 +85,6 @@ export default function PebbleDBExplorer() {
     }
     console.warn('Wails backend not available. Skipping key fetch.');
     return null;
-  };
-
-  const safeGetValue = async (db: string, key: string) => {
-    if (hasWailsBackend()) {
-      return backend.GetValue(db, key);
-    }
-    console.warn('Wails backend not available. Returning empty value.');
-    return '';
   };
 
   const applyPageResult = (db: string, page: main.KeyPageResult, mode: 'replace' | 'append') => {
@@ -352,22 +350,13 @@ export default function PebbleDBExplorer() {
   useEffect(() => {
     if (selectedDb && selectedKey) {
       const cacheKey = `${selectedDb}_${selectedKey}`;
-      if (!values[cacheKey]) {
-        // Get value with metadata for better display
-        if (hasWailsBackend()) {
-          backend.GetValueWithMetadata(selectedDb, selectedKey).then((metadata: any) => {
-            if (metadata) {
-              setValueMetadata(metadata);
-              setValues(prev => ({ ...prev, [cacheKey]: metadata.value }));
-            }
-          });
-        } else {
-          safeGetValue(selectedDb, selectedKey).then((val: string) => {
-            if (val) {
-              setValues(prev => ({ ...prev, [cacheKey]: val }));
-            }
-          });
-        }
+      if (!values[cacheKey] && hasWailsBackend()) {
+        backend.GetValueWithMetadata(selectedDb, selectedKey).then((metadata: any) => {
+          if (metadata) {
+            setValueMetadata(metadata);
+            setValues(prev => ({ ...prev, [cacheKey]: metadata.value }));
+          }
+        });
       }
     }
   }, [selectedDb, selectedKey]);
@@ -572,14 +561,18 @@ export default function PebbleDBExplorer() {
                 className="w-full rounded-lg border border-slate-300 bg-white py-2 pl-10 pr-4 text-sm shadow-sm transition focus:border-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-500"
               />
             </div>
-            <select
+            <Select
               value={searchType}
-              onChange={(e) => setSearchType(e.target.value as 'block_number' | 'tx_hash')}
-              className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 shadow-sm transition focus:border-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-500"
+              onValueChange={(value) => setSearchType(value as 'block_number' | 'tx_hash')}
             >
-              <option value="block_number">Block Number</option>
-              <option value="tx_hash">TX Hash</option>
-            </select>
+              <SelectTrigger className="w-[180px]">
+                <SelectValue placeholder="Select type" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="block_number">Block Number</SelectItem>
+                <SelectItem value="tx_hash">TX Hash</SelectItem>
+              </SelectContent>
+            </Select>
             <button
               onClick={handleSearch}
               disabled={isSearching || !selectedDb}

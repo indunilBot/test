@@ -169,111 +169,6 @@ func formatKeyForDisplay(keyBytes []byte) string {
 	return "0x" + hex.EncodeToString(keyBytes)
 }
 
-// GetKeysByPrefix returns keys grouped by prefix (e.g., "user:" -> "user").
-// Optimized version - loads keys in chunks for better performance
-func (a *App) GetKeysByPrefix(dbName string) map[string][]string {
-	dbAny, ok := dbs.Load(dbName)
-	if !ok {
-		fmt.Println("ERROR: Database not found:", dbName)
-		return map[string][]string{}
-	}
-	db := dbAny.(*pebble.DB)
-
-	maxTotalKeys := getEnvInt("GPAW_MAX_KEYS_TOTAL", defaultMaxTotalKeys)
-	maxKeysPerPrefix := getEnvInt("GPAW_MAX_KEYS_PER_PREFIX", defaultMaxKeysPerPrefix)
-	if maxTotalKeys <= 0 {
-		maxTotalKeys = defaultMaxTotalKeys
-	}
-	if maxKeysPerPrefix <= 0 {
-		maxKeysPerPrefix = defaultMaxKeysPerPrefix
-	}
-
-	prefixes := make(map[string][]string)
-	iter, err := db.NewIter(&pebble.IterOptions{})
-	if err != nil {
-		fmt.Println("ERROR: Failed to create iterator:", err)
-		return map[string][]string{}
-	}
-	defer iter.Close()
-
-	const initialCapacity = 100
-	totalProcessed := 0
-	totalStored := 0
-	truncatedTotal := false
-	truncatedPrefixes := make(map[string]int)
-
-	for iter.First(); iter.Valid(); iter.Next() {
-		if totalProcessed >= maxTotalKeys {
-			truncatedTotal = true
-			break
-		}
-
-		totalProcessed++
-
-		keyBytes := iter.Key()
-		key := formatKeyForDisplay(keyBytes)
-
-		colonIdx := strings.IndexByte(key, ':')
-		var prefix string
-
-		if colonIdx > 0 {
-			prefix = key[:colonIdx]
-		} else if strings.HasPrefix(key, "0x") && len(key) > 6 {
-			prefix = key[:6]
-		} else if len(key) > 4 {
-			prefix = key[:4]
-		} else {
-			prefix = "misc"
-		}
-
-		keysForPrefix, exists := prefixes[prefix]
-		if !exists {
-			keysForPrefix = make([]string, 0, initialCapacity)
-		}
-
-		if len(keysForPrefix) >= maxKeysPerPrefix {
-			truncatedPrefixes[prefix]++
-			prefixes[prefix] = keysForPrefix
-			continue
-		}
-
-		keysForPrefix = append(keysForPrefix, key)
-		prefixes[prefix] = keysForPrefix
-		totalStored++
-	}
-
-	if err := iter.Error(); err != nil {
-		fmt.Println("ERROR: Iterator error:", err)
-		return map[string][]string{}
-	}
-
-	fmt.Printf("SUCCESS: Loaded %d keys into %d prefixes (processed %d total)\n", totalStored, len(prefixes), totalProcessed)
-
-	if truncatedTotal {
-		fmt.Printf("WARNING: Hit GPAW_MAX_KEYS_TOTAL limit (%d); results truncated.\n", maxTotalKeys)
-	}
-	if len(truncatedPrefixes) > 0 {
-		fmt.Printf("WARNING: %d prefixes exceeded GPAW_MAX_KEYS_PER_PREFIX limit (%d).\n", len(truncatedPrefixes), maxKeysPerPrefix)
-		count := 0
-		for prefix, skipped := range truncatedPrefixes {
-			if count >= 3 {
-				break
-			}
-			fmt.Printf("  - Prefix '%s': skipped %d additional keys\n", prefix, skipped)
-			count++
-		}
-	}
-
-	count := 0
-	for prefix, keys := range prefixes {
-		if count < 3 {
-			fmt.Printf("  - Prefix '%s': %d keys\n", prefix, len(keys))
-			count++
-		}
-	}
-
-	return prefixes
-}
 
 type KeyPageResult struct {
 	Prefixes   map[string][]string `json:"prefixes"`
@@ -282,126 +177,6 @@ type KeyPageResult struct {
 	NextCursor string              `json:"nextCursor,omitempty"`
 	LastKey    string              `json:"lastKey,omitempty"`
 	Error      string              `json:"error,omitempty"`
-}
-
-// GetKeysChunked returns keys in chunks with progress updates
-func (a *App) GetKeysChunked(dbName string, chunkSize int) map[string]interface{} {
-	dbAny, ok := dbs.Load(dbName)
-	if !ok {
-		return map[string]interface{}{"error": "database not found"}
-	}
-	db := dbAny.(*pebble.DB)
-
-	result := make(map[string]interface{})
-	prefixes := make(map[string][]string)
-
-	iter, err := db.NewIter(&pebble.IterOptions{})
-	if err != nil {
-		result["error"] = err.Error()
-		return result
-	}
-	defer iter.Close()
-
-	count := 0
-	const initialCapacity = 100
-
-	for iter.First(); iter.Valid(); iter.Next() {
-		keyBytes := iter.Key()
-		key := formatKeyForDisplay(keyBytes)
-
-		colonIdx := strings.IndexByte(key, ':')
-		var prefix string
-
-		if colonIdx > 0 {
-			prefix = key[:colonIdx]
-		} else if strings.HasPrefix(key, "0x") && len(key) > 6 {
-			prefix = key[:6]
-		} else if len(key) > 4 {
-			prefix = key[:4]
-		} else {
-			prefix = "misc"
-		}
-
-		if _, exists := prefixes[prefix]; !exists {
-			prefixes[prefix] = make([]string, 0, initialCapacity)
-		}
-
-		prefixes[prefix] = append(prefixes[prefix], key)
-		count++
-
-		// Return chunk when we hit the limit
-		if count >= chunkSize {
-			result["keys"] = prefixes
-			result["count"] = count
-			result["hasMore"] = true
-			return result
-		}
-	}
-
-	result["keys"] = prefixes
-	result["count"] = count
-	result["hasMore"] = false
-
-	return result
-}
-
-// GetKeysWithPagination returns paginated keys for better performance with large datasets
-func (a *App) GetKeysWithPagination(dbName string, offset int, limit int) map[string]interface{} {
-	dbAny, ok := dbs.Load(dbName)
-	if !ok {
-		return map[string]interface{}{"error": "database not found"}
-	}
-	db := dbAny.(*pebble.DB)
-
-	result := make(map[string]interface{})
-	prefixes := make(map[string][]string)
-
-	iter, err := db.NewIter(&pebble.IterOptions{})
-	if err != nil {
-		result["error"] = err.Error()
-		return result
-	}
-	defer iter.Close()
-
-	// Skip to offset
-	count := 0
-	iter.First()
-	for count < offset && iter.Valid() {
-		iter.Next()
-		count++
-	}
-
-	// Collect keys up to limit
-	collected := 0
-	for iter.Valid() && collected < limit {
-		keyBytes := iter.Key()
-		key := formatKeyForDisplay(keyBytes)
-
-		parts := strings.SplitN(key, ":", 2)
-		prefix := parts[0]
-
-		if len(parts) == 1 {
-			if strings.HasPrefix(key, "0x") && len(key) > 6 {
-				prefix = key[:6]
-			} else if len(key) > 4 {
-				prefix = key[:4]
-			} else {
-				prefix = "misc"
-			}
-		}
-
-		prefixes[prefix] = append(prefixes[prefix], key)
-		collected++
-		iter.Next()
-	}
-
-	result["keys"] = prefixes
-	result["hasMore"] = iter.Valid()
-	result["offset"] = offset
-	result["limit"] = limit
-	result["count"] = collected
-
-	return result
 }
 
 func (a *App) GetKeysByPrefixPage(dbName string, cursor string, limit int) *KeyPageResult {
@@ -562,20 +337,6 @@ func isPrintable(s string) bool {
 	return len(s) > 0 && float64(printableCount)/float64(len(s)) > 0.95
 }
 
-// GetValue returns the value for a key as a string (assumed JSON or text).
-func (a *App) GetValue(dbName string, key string) string {
-	dbAny, ok := dbs.Load(dbName)
-	if !ok {
-		return ""
-	}
-	db := dbAny.(*pebble.DB)
-	value, closer, err := db.Get([]byte(key))
-	if err != nil {
-		return ""
-	}
-	defer closer.Close()
-	return string(value)
-}
 
 // parseKeyFromDisplay converts display key back to bytes (handles hex keys)
 func parseKeyFromDisplay(displayKey string) []byte {
@@ -702,27 +463,6 @@ func (a *App) GetValueWithMetadata(dbName string, key string) *KeyValueData {
 	return result
 }
 
-// GetKeyCount returns just the count of keys for quick feedback
-func (a *App) GetKeyCount(dbName string) int {
-	dbAny, ok := dbs.Load(dbName)
-	if !ok {
-		return 0
-	}
-	db := dbAny.(*pebble.DB)
-
-	iter, err := db.NewIter(&pebble.IterOptions{})
-	if err != nil {
-		return 0
-	}
-	defer iter.Close()
-
-	count := 0
-	for iter.First(); iter.Valid(); iter.Next() {
-		count++
-	}
-
-	return count
-}
 
 // GetDatabaseStats returns statistics about the database for debugging.
 func (a *App) GetDatabaseStats(dbName string) map[string]interface{} {
@@ -1002,37 +742,6 @@ func (a *App) SearchByBlockNumber(dbName string, blockNumber int64) (*KeyValueDa
 	return nil, fmt.Errorf("block %d not found (scanned %d keys)", blockNumber, count)
 }
 
-// checkBlockNumber helper to check if an iterator position contains the target block number
-func (a *App) checkBlockNumber(iter *pebble.Iterator, blockNumber int64) *KeyValueData {
-	value, err := iter.ValueAndErr()
-	if err != nil {
-		return nil
-	}
-
-	// Try fast path - check if value contains the block number string
-	blockNumStr := strconv.FormatInt(blockNumber, 10)
-	if !bytes.Contains(value, []byte(blockNumStr)) {
-		return nil
-	}
-
-	// Parse JSON and check block_number
-	var data map[string]interface{}
-	if err := json.Unmarshal(value, &data); err != nil {
-		return nil
-	}
-
-	// Check if this is a block entry
-	if block, ok := data["block"].(map[string]interface{}); ok {
-		if blockNum, ok := block["block_number"].(float64); ok {
-			if int64(blockNum) == blockNumber {
-				foundKey := formatKeyForDisplay(iter.Key())
-				return a.parseKeyValueData(foundKey, value)
-			}
-		}
-	}
-
-	return nil
-}
 
 // SearchByTxHash searches for a transaction by its hash using indexed keys
 // Index key format: "txh_idx:<tx_hash>" -> points to block key
@@ -1148,51 +857,6 @@ func (a *App) SearchByTxHash(dbName string, txHash string) (*KeyValueData, error
 	}
 
 	return nil, fmt.Errorf("transaction %s not found (scanned %d keys)", txHash, count)
-}
-
-// SearchKeys searches for keys matching a pattern with prefix optimization
-func (a *App) SearchKeys(dbName string, searchTerm string, searchType string, limit int) []string {
-	dbAny, ok := dbs.Load(dbName)
-	if !ok {
-		return []string{}
-	}
-	db := dbAny.(*pebble.DB)
-
-	if limit <= 0 {
-		limit = 100
-	}
-
-	var searchPrefix string
-	switch searchType {
-	case "block_number":
-		searchPrefix = "block:"
-	case "tx_hash":
-		searchPrefix = "tx:"
-	default:
-		searchPrefix = ""
-	}
-
-	results := make([]string, 0, limit)
-	searchKey := searchPrefix + searchTerm
-
-	// Use PebbleDB's efficient prefix iteration
-	iter, err := db.NewIter(&pebble.IterOptions{
-		LowerBound: []byte(searchKey),
-		UpperBound: []byte(searchKey + "\xff"),
-	})
-	if err != nil {
-		return results
-	}
-	defer iter.Close()
-
-	count := 0
-	for iter.First(); iter.Valid() && count < limit; iter.Next() {
-		key := formatKeyForDisplay(iter.Key())
-		results = append(results, key)
-		count++
-	}
-
-	return results
 }
 
 // parseKeyValueData helper function to convert raw data to KeyValueData
