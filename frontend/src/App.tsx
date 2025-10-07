@@ -49,6 +49,9 @@ export default function PebbleDBExplorer() {
   const [loadProgress, setLoadProgress] = useState(0);
   const [paginationByDb, setPaginationByDb] = useState<{ [db: string]: PaginationState }>({});
   const [isLoadingMore, setIsLoadingMore] = useState(false);
+  const [searchType, setSearchType] = useState<'block_number' | 'tx_hash'>('block_number');
+  const [isSearching, setIsSearching] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
 
   const hasWailsBackend = () => Boolean((window as any).go?.main?.App);
 
@@ -445,6 +448,54 @@ export default function PebbleDBExplorer() {
     }
   };
 
+  const handleSearch = async () => {
+    if (!selectedDb || !searchTerm.trim()) {
+      setSearchError('Please enter a search term');
+      return;
+    }
+
+    setIsSearching(true);
+    setSearchError(null);
+
+    try {
+      let result: any = null;
+
+      if (searchType === 'block_number') {
+        const blockNum = parseInt(searchTerm);
+        if (isNaN(blockNum)) {
+          setSearchError('Invalid block number. Please enter a valid number.');
+          setIsSearching(false);
+          return;
+        }
+        result = await backend.SearchByBlockNumber(selectedDb, blockNum);
+      } else {
+        result = await backend.SearchByTxHash(selectedDb, searchTerm.trim());
+      }
+
+      if (result && result.key) {
+        // Set the found key as selected
+        setSelectedKey(result.key);
+        setValueMetadata(result);
+        const cacheKey = `${selectedDb}_${result.key}`;
+        setValues(prev => ({ ...prev, [cacheKey]: result.value }));
+        setSearchError(null);
+      } else {
+        setSearchError(`No ${searchType === 'block_number' ? 'block' : 'transaction'} found`);
+      }
+    } catch (err: any) {
+      setSearchError(err?.message || `Search failed: ${String(err)}`);
+      console.error('Search error:', err);
+    } finally {
+      setIsSearching(false);
+    }
+  };
+
+  const handleSearchKeyPress = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') {
+      handleSearch();
+    }
+  };
+
   return (
     <div className="relative flex h-screen bg-slate-100 text-slate-900">
       <div className="w-64 bg-[#19334D] text-slate-100 flex flex-col">
@@ -507,32 +558,51 @@ export default function PebbleDBExplorer() {
       </div>
 
       <div className="flex flex-1 flex-col bg-white">
-        <div className="flex items-center gap-3 border-b border-slate-200 bg-white p-4">
-          <div className="relative flex-1">
-            <Search className="pointer-events-none absolute left-3 top-1/2 h-5 w-5 -translate-y-1/2 text-slate-400" />
-            <input
-              type="text"
-              placeholder="Search keys..."
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-              className="w-full rounded-lg border border-slate-300 bg-white py-2 pl-10 pr-4 text-sm shadow-sm transition focus:border-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-500"
-            />
+        <div className="border-b border-slate-200 bg-white p-4 space-y-3">
+          {/* Search Bar with Type Selector */}
+          <div className="flex items-center gap-3">
+            <div className="relative flex-1">
+              <Search className="pointer-events-none absolute left-3 top-1/2 h-5 w-5 -translate-y-1/2 text-slate-400" />
+              <input
+                type="text"
+                placeholder={searchType === 'block_number' ? 'Search by block number (e.g. 30056044)...' : 'Search by transaction hash...'}
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                onKeyPress={handleSearchKeyPress}
+                className="w-full rounded-lg border border-slate-300 bg-white py-2 pl-10 pr-4 text-sm shadow-sm transition focus:border-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-500"
+              />
+            </div>
+            <select
+              value={searchType}
+              onChange={(e) => setSearchType(e.target.value as 'block_number' | 'tx_hash')}
+              className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 shadow-sm transition focus:border-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-500"
+            >
+              <option value="block_number">Block Number</option>
+              <option value="tx_hash">TX Hash</option>
+            </select>
+            <button
+              onClick={handleSearch}
+              disabled={isSearching || !selectedDb}
+              className="inline-flex items-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-sky-700 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <Search className="w-4 h-4" />
+              {isSearching ? 'Searching...' : 'Search'}
+            </button>
+            <button
+              onClick={handleRefresh}
+              className="inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-sky-100 px-4 py-2 text-sm font-medium text-sky-800 transition hover:bg-sky-200"
+            >
+              <RefreshCw className="w-4 h-4" />
+              Refresh
+            </button>
           </div>
-          <button className="inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-sky-100 px-4 py-2 text-sm font-medium text-sky-800 transition hover:bg-sky-200">
-            <Filter className="w-4 h-4" />
-            Filter
-          </button>
-          <button
-            onClick={handleRefresh}
-            className="inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-sky-100 px-4 py-2 text-sm font-medium text-sky-800 transition hover:bg-sky-200"
-          >
-            <RefreshCw className="w-4 h-4" />
-            Refresh
-          </button>
-          <button className="inline-flex items-center gap-2 rounded-lg bg-[#003C67] px-4 py-2 text-sm font-medium text-white transition hover:opacity-90">
-            <Plus className="w-4 h-4" />
-            Add Key
-          </button>
+
+          {/* Search Error Message */}
+          {searchError && (
+            <div className="rounded-lg bg-rose-50 border border-rose-200 px-4 py-2 text-sm text-rose-600">
+              {searchError}
+            </div>
+          )}
         </div>
 
         <div className="flex flex-1 min-h-0">
@@ -670,7 +740,7 @@ export default function PebbleDBExplorer() {
                 <div className="flex-none bg-white border-b border-slate-200 px-6 py-4">
                   <div className="flex items-start justify-between gap-4">
                     <div className="flex-1 min-w-0">
-                      <h2 className="text-lg font-semibold text-slate-900 break-all">{selectedKey}</h2>
+                      <h5 className="text-sm font-semibold text-slate-900 break-all">{selectedKey}</h5>
                       {valueMetadata && (
                         <div className="flex items-center gap-4 mt-2 text-sm text-slate-600">
                           <span className="flex items-center gap-1">

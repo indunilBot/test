@@ -127,13 +127,44 @@ func (a *App) GetConnectionPaths() map[string]string {
 
 // formatKeyForDisplay converts binary keys to readable format
 func formatKeyForDisplay(keyBytes []byte) string {
-	// If it's valid UTF-8 and printable, use as-is
-	if utf8.Valid(keyBytes) {
-		str := string(keyBytes)
-		if isPrintable(str) {
-			return str
+	// Check for common prefixes and format accordingly
+	key := string(keyBytes)
+
+	// Handle "block:<number>:<hash>" format
+	if strings.HasPrefix(key, "block:") {
+		parts := strings.SplitN(key, ":", 3)
+		if len(parts) == 3 {
+			prefix := parts[0]
+			blockNum := parts[1]
+			hashBytes := []byte(parts[2])
+
+			// Convert hash to hex if it contains non-printable characters
+			if !isPrintable(parts[2]) {
+				hashHex := hex.EncodeToString(hashBytes)
+				return fmt.Sprintf("%s:%s:%s", prefix, blockNum, hashHex)
+			}
 		}
 	}
+
+	// Handle "txh_idx:<hash>" format
+	if strings.HasPrefix(key, "txh_idx:") {
+		parts := strings.SplitN(key, ":", 2)
+		if len(parts) == 2 {
+			hashBytes := []byte(parts[1])
+			if !isPrintable(parts[1]) {
+				hashHex := hex.EncodeToString(hashBytes)
+				return fmt.Sprintf("txh_idx:%s", hashHex)
+			}
+		}
+	}
+
+	// If it's valid UTF-8 and printable, use as-is
+	if utf8.Valid(keyBytes) {
+		if isPrintable(key) {
+			return key
+		}
+	}
+
 	// Otherwise, show as hex with prefix
 	return "0x" + hex.EncodeToString(keyBytes)
 }
@@ -713,11 +744,19 @@ func (a *App) GetDatabaseStats(dbName string) map[string]interface{} {
 
 	keyCount := 0
 	var firstKey, lastKey string
+	sampleKeys := make([]string, 0, 10)
+
 	for iter.First(); iter.Valid(); iter.Next() {
 		if keyCount == 0 {
 			firstKey = formatKeyForDisplay(iter.Key())
 		}
 		lastKey = formatKeyForDisplay(iter.Key())
+
+		// Collect sample keys to help understand key format
+		if keyCount < 10 {
+			sampleKeys = append(sampleKeys, formatKeyForDisplay(iter.Key()))
+		}
+
 		keyCount++
 
 		// Limit iteration for stats to avoid hanging
@@ -729,6 +768,7 @@ func (a *App) GetDatabaseStats(dbName string) map[string]interface{} {
 	stats["totalKeys"] = keyCount
 	stats["firstKey"] = firstKey
 	stats["lastKey"] = lastKey
+	stats["sampleKeys"] = sampleKeys
 
 	if err := iter.Error(); err != nil {
 		stats["iterError"] = err.Error()
@@ -845,6 +885,380 @@ func (a *App) UpdateConnection(oldName, newName, path string) error {
 	}
 
 	return nil
+}
+
+// SearchResult represents a search result with metadata
+type SearchResult struct {
+	Key         string `json:"key"`
+	Value       string `json:"value"`
+	BlockNumber int64  `json:"blockNumber,omitempty"`
+	TxHash      string `json:"txHash,omitempty"`
+	Type        string `json:"type"` // "block" or "transaction"
+}
+
+// SearchByBlockNumber searches for a block by its block number using indexed keys
+// Key format: "block:<20-digit-padded-number>:<block_hash>"
+// Example: "block:00000000000000001244:abc123..."
+func (a *App) SearchByBlockNumber(dbName string, blockNumber int64) (*KeyValueData, error) {
+	dbAny, ok := dbs.Load(dbName)
+	if !ok {
+		return nil, fmt.Errorf("database not found")
+	}
+	db := dbAny.(*pebble.DB)
+
+	// Use the exact indexed key format from paw-corenet-layer
+	// Key format: "block:<20-digit-padded>:<hash>"
+	prefix := fmt.Sprintf("block:%020d:", blockNumber)
+	fmt.Printf("🔍 Searching for block %d with prefix: %s\n", blockNumber, prefix)
+
+	// Use efficient prefix iteration with bounds
+	iter, err := db.NewIter(&pebble.IterOptions{
+		LowerBound: []byte(prefix),
+		UpperBound: []byte(prefix + "\xff"),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create iterator: %v", err)
+	}
+	defer iter.Close()
+
+	// Seek directly to the prefix
+	if iter.SeekGE([]byte(prefix)) && iter.Valid() {
+		keyBytes := iter.Key()
+		keyDisplay := formatKeyForDisplay(keyBytes)
+
+		// Check if this key matches our prefix
+		if bytes.HasPrefix(keyBytes, []byte(prefix)) {
+			value := iter.Value()
+			fmt.Printf("✓ Found block %d instantly via indexed key: %s\n", blockNumber, keyDisplay)
+			return a.parseKeyValueData(keyDisplay, value), nil
+		}
+	}
+
+	// If not found with indexed format, try other common formats
+	alternativeKeys := []string{
+		fmt.Sprintf("block:%d", blockNumber),
+		fmt.Sprintf("%d", blockNumber),
+		fmt.Sprintf("block_%d", blockNumber),
+		fmt.Sprintf("%020d", blockNumber),
+	}
+
+	for _, altKey := range alternativeKeys {
+		value, closer, err := db.Get([]byte(altKey))
+		if err == nil {
+			defer closer.Close()
+			fmt.Printf("✓ Found block %d via alternative key format: %s\n", blockNumber, altKey)
+			return a.parseKeyValueData(altKey, value), nil
+		}
+	}
+
+	// Last resort: full scan with progress reporting
+	fmt.Printf("⚠️  Block %d not found in indexes. Starting full scan (this will be slow)...\n", blockNumber)
+
+	fullIter, err := db.NewIter(&pebble.IterOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create iterator: %v", err)
+	}
+	defer fullIter.Close()
+
+	count := 0
+	const reportInterval = 50000
+	blockNumStr := strconv.FormatInt(blockNumber, 10)
+	blockNumBytes := []byte(blockNumStr)
+
+	for fullIter.First(); fullIter.Valid(); fullIter.Next() {
+		count++
+
+		if count%reportInterval == 0 {
+			fmt.Printf("⏳ Scanned %d keys...\n", count)
+		}
+
+		value, err := fullIter.ValueAndErr()
+		if err != nil {
+			continue
+		}
+
+		// Fast path - check if value contains the block number
+		if !bytes.Contains(value, blockNumBytes) {
+			continue
+		}
+
+		// Parse JSON and verify block_number
+		var data map[string]interface{}
+		if err := json.Unmarshal(value, &data); err != nil {
+			continue
+		}
+
+		if block, ok := data["block"].(map[string]interface{}); ok {
+			if blockNum, ok := block["block_number"].(float64); ok {
+				if int64(blockNum) == blockNumber {
+					foundKey := formatKeyForDisplay(fullIter.Key())
+					fmt.Printf("✓ Found block %d after scanning %d keys\n", blockNumber, count)
+					return a.parseKeyValueData(foundKey, value), nil
+				}
+			}
+		}
+	}
+
+	return nil, fmt.Errorf("block %d not found (scanned %d keys)", blockNumber, count)
+}
+
+// checkBlockNumber helper to check if an iterator position contains the target block number
+func (a *App) checkBlockNumber(iter *pebble.Iterator, blockNumber int64) *KeyValueData {
+	value, err := iter.ValueAndErr()
+	if err != nil {
+		return nil
+	}
+
+	// Try fast path - check if value contains the block number string
+	blockNumStr := strconv.FormatInt(blockNumber, 10)
+	if !bytes.Contains(value, []byte(blockNumStr)) {
+		return nil
+	}
+
+	// Parse JSON and check block_number
+	var data map[string]interface{}
+	if err := json.Unmarshal(value, &data); err != nil {
+		return nil
+	}
+
+	// Check if this is a block entry
+	if block, ok := data["block"].(map[string]interface{}); ok {
+		if blockNum, ok := block["block_number"].(float64); ok {
+			if int64(blockNum) == blockNumber {
+				foundKey := formatKeyForDisplay(iter.Key())
+				return a.parseKeyValueData(foundKey, value)
+			}
+		}
+	}
+
+	return nil
+}
+
+// SearchByTxHash searches for a transaction by its hash using indexed keys
+// Index key format: "txh_idx:<tx_hash>" -> points to block key
+// Then reads the block to get the full data
+func (a *App) SearchByTxHash(dbName string, txHash string) (*KeyValueData, error) {
+	dbAny, ok := dbs.Load(dbName)
+	if !ok {
+		return nil, fmt.Errorf("database not found")
+	}
+	db := dbAny.(*pebble.DB)
+
+	// Use the exact indexed key format from paw-corenet-layer
+	// Index format: "txh_idx:<tx_hash>" -> block key
+	txHashIndexKey := fmt.Sprintf("txh_idx:%s", txHash)
+	fmt.Printf("🔍 Searching for transaction with index key: %s\n", txHashIndexKey)
+
+	// Try to get the block key from the transaction index
+	blockKey, closer, err := db.Get([]byte(txHashIndexKey))
+	if err == nil {
+		defer closer.Close()
+		blockKeyDisplay := formatKeyForDisplay(blockKey)
+		fmt.Printf("✓ Found transaction index, reading block: %s\n", blockKeyDisplay)
+
+		// Get the actual block data
+		blockData, closer2, err := db.Get(blockKey)
+		if err == nil {
+			defer closer2.Close()
+			fmt.Printf("✓ Found transaction instantly via indexed lookup\n")
+			return a.parseKeyValueData(blockKeyDisplay, blockData), nil
+		}
+	}
+
+	// Try alternative index formats
+	alternativeIndexKeys := []string{
+		fmt.Sprintf("tx:%s", txHash),
+		fmt.Sprintf("txhash:%s", txHash),
+		fmt.Sprintf("transaction:%s", txHash),
+		txHash,
+	}
+
+	for _, altKey := range alternativeIndexKeys {
+		// Check if it's an index key
+		blockKey, closer, err := db.Get([]byte(altKey))
+		if err == nil {
+			// Try to use it as a block key reference
+			blockData, closer2, err := db.Get(blockKey)
+			if err == nil {
+				blockKeyDisplay := formatKeyForDisplay(blockKey)
+				closer.Close()
+				closer2.Close()
+				fmt.Printf("✓ Found transaction via alternative index: %s -> %s\n", altKey, blockKeyDisplay)
+				return a.parseKeyValueData(blockKeyDisplay, blockData), nil
+			}
+			closer.Close()
+
+			// Maybe it's direct block data
+			fmt.Printf("✓ Found transaction via direct key: %s\n", altKey)
+			return a.parseKeyValueData(altKey, blockKey), nil
+		}
+	}
+
+	// Last resort: full scan
+	fmt.Printf("⚠️  Transaction %s not found in indexes. Starting full scan (this will be slow)...\n", txHash)
+
+	iter, err := db.NewIter(&pebble.IterOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create iterator: %v", err)
+	}
+	defer iter.Close()
+
+	count := 0
+	const reportInterval = 50000
+	txHashBytes := []byte(txHash)
+
+	for iter.First(); iter.Valid(); iter.Next() {
+		count++
+
+		if count%reportInterval == 0 {
+			fmt.Printf("⏳ Scanned %d keys...\n", count)
+		}
+
+		value, err := iter.ValueAndErr()
+		if err != nil {
+			continue
+		}
+
+		// Fast path - check if value contains the tx hash
+		if !bytes.Contains(value, txHashBytes) {
+			continue
+		}
+
+		// Parse JSON and verify
+		var data map[string]interface{}
+		if err := json.Unmarshal(value, &data); err != nil {
+			continue
+		}
+
+		if block, ok := data["block"].(map[string]interface{}); ok {
+			if txs, ok := block["transactions"].([]interface{}); ok {
+				for _, tx := range txs {
+					if txMap, ok := tx.(map[string]interface{}); ok {
+						if hash, ok := txMap["tx_hash"].(string); ok {
+							if hash == txHash {
+								foundKey := formatKeyForDisplay(iter.Key())
+								fmt.Printf("✓ Found transaction after scanning %d keys\n", count)
+								return a.parseKeyValueData(foundKey, value), nil
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return nil, fmt.Errorf("transaction %s not found (scanned %d keys)", txHash, count)
+}
+
+// SearchKeys searches for keys matching a pattern with prefix optimization
+func (a *App) SearchKeys(dbName string, searchTerm string, searchType string, limit int) []string {
+	dbAny, ok := dbs.Load(dbName)
+	if !ok {
+		return []string{}
+	}
+	db := dbAny.(*pebble.DB)
+
+	if limit <= 0 {
+		limit = 100
+	}
+
+	var searchPrefix string
+	switch searchType {
+	case "block_number":
+		searchPrefix = "block:"
+	case "tx_hash":
+		searchPrefix = "tx:"
+	default:
+		searchPrefix = ""
+	}
+
+	results := make([]string, 0, limit)
+	searchKey := searchPrefix + searchTerm
+
+	// Use PebbleDB's efficient prefix iteration
+	iter, err := db.NewIter(&pebble.IterOptions{
+		LowerBound: []byte(searchKey),
+		UpperBound: []byte(searchKey + "\xff"),
+	})
+	if err != nil {
+		return results
+	}
+	defer iter.Close()
+
+	count := 0
+	for iter.First(); iter.Valid() && count < limit; iter.Next() {
+		key := formatKeyForDisplay(iter.Key())
+		results = append(results, key)
+		count++
+	}
+
+	return results
+}
+
+// parseKeyValueData helper function to convert raw data to KeyValueData
+func (a *App) parseKeyValueData(key string, value []byte) *KeyValueData {
+	originalSize := len(value)
+	valueType := detectValueType(value)
+	isTruncated := false
+	truncatedMsg := ""
+
+	// Check if value is too large
+	if originalSize > MaxValueSize {
+		truncatedMsg = fmt.Sprintf("⚠️ Value size (%s) exceeds display limit (%s). Showing preview only.",
+			formatBytes(originalSize), formatBytes(MaxValueSize))
+		value = value[:MaxPreviewSize]
+		isTruncated = true
+	}
+
+	result := &KeyValueData{
+		Key:         key,
+		Type:        valueType,
+		Size:        originalSize,
+		IsTruncated: isTruncated,
+	}
+
+	// Handle different value types
+	if valueType == "json" {
+		var prettyJSON interface{}
+		if err := json.Unmarshal(value, &prettyJSON); err == nil {
+			if formatted, err := json.MarshalIndent(prettyJSON, "", "  "); err == nil {
+				displayValue, msg := truncateWithMessage(string(formatted), MaxPreviewSize, originalSize)
+				result.Value = displayValue
+				if msg != "" {
+					result.TruncatedMsg = msg
+				}
+			}
+		} else {
+			result.Value = string(value)
+		}
+	} else if valueType == "string" {
+		displayValue, msg := truncateWithMessage(string(value), MaxPreviewSize, originalSize)
+		result.Value = displayValue
+		if msg != "" {
+			result.TruncatedMsg = msg
+		}
+	} else {
+		result.Value = fmt.Sprintf("[Binary Data - %s]", formatBytes(originalSize))
+	}
+
+	// Generate hex and base64
+	if originalSize <= MaxHexDisplaySize {
+		result.ValueHex = hex.EncodeToString(value)
+	} else {
+		result.ValueHex = fmt.Sprintf("[Too large for hex display - %s]", formatBytes(originalSize))
+	}
+
+	if originalSize <= MaxBase64Size {
+		result.ValueBase64 = base64.StdEncoding.EncodeToString(value)
+	} else {
+		result.ValueBase64 = fmt.Sprintf("[Too large for base64 display - %s]", formatBytes(originalSize))
+	}
+
+	if truncatedMsg != "" && result.TruncatedMsg == "" {
+		result.TruncatedMsg = truncatedMsg
+	}
+
+	return result
 }
 
 // shutdown closes all DBs (called on app close).
