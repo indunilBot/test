@@ -7,18 +7,20 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
 	"unicode/utf8"
 
 	"github.com/cockroachdb/pebble"
+	"github.com/cockroachdb/pebble/vfs"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 	"golang.org/x/sync/syncmap"
 )
 
-var connections syncmap.Map // name (string) -> path (string)
-var dbs syncmap.Map         // name (string) -> *pebble.DB
+var connections syncmap.Map 
+var dbs syncmap.Map         
 
 const (
 	defaultMaxTotalKeys     = 5000
@@ -26,6 +28,22 @@ const (
 	defaultPageLimit        = 1000
 	maxPageLimit            = 5000
 )
+
+// readOnlyFS wraps vfs.FS to ignore LOCK file for concurrent read-only access
+type readOnlyFS struct {
+	vfs.FS
+}
+
+// Lock returns a no-op lock for read-only access, allowing concurrent readers
+func (fs *readOnlyFS) Lock(name string) (io.Closer, error) {
+	// For read-only access, we bypass the lock mechanism entirely
+	// This allows multiple processes to open the DB concurrently
+	return &noOpLock{}, nil
+}
+
+type noOpLock struct{}
+
+func (l *noOpLock) Close() error { return nil }
 
 func getEnvInt(key string, defaultValue int) int {
 	raw := strings.TrimSpace(os.Getenv(key))
@@ -60,14 +78,22 @@ func (a *App) AddConnection(name string, path string) error {
 	if _, exists := connections.Load(name); exists {
 		return fmt.Errorf("connection '%s' already exists", name)
 	}
+	// Use custom FS that bypasses LOCK file for concurrent read-only access
+	roFS := &readOnlyFS{FS: vfs.Default}
+
 	db, err := pebble.Open(path, &pebble.Options{
-		ReadOnly:      true,
-		ErrorIfExists: false,
-		DisableWAL:    true,
+		ReadOnly:         true,
+		ErrorIfExists:    false,
+		ErrorIfNotExists: false,
+		DisableWAL:       true,
+		FS:               roFS, // Use custom FS that ignores locks
 	})
+
 	if err != nil {
-		if strings.Contains(err.Error(), "resource temporarily unavailable") {
-			return fmt.Errorf("database is locked by another process. Please close any applications using this database and try again")
+		if strings.Contains(err.Error(), "resource temporarily unavailable") ||
+		   strings.Contains(err.Error(), "lock") ||
+		   strings.Contains(err.Error(), "LOCK") {
+			return fmt.Errorf("database is locked by another process. Unable to open in read-only mode: %v", err)
 		}
 		return fmt.Errorf("failed to open database: %v", err)
 	}
@@ -785,10 +811,15 @@ func (a *App) UpdateConnection(oldName, newName, path string) error {
 	var err error
 
 	if newPath != oldPath || oldDB == nil {
+		// Use custom FS that bypasses LOCK file for concurrent read-only access
+		roFS := &readOnlyFS{FS: vfs.Default}
+
 		newDB, err = pebble.Open(newPath, &pebble.Options{
-			ReadOnly:      true,
-			ErrorIfExists: false,
-			DisableWAL:    true,
+			ReadOnly:         true,
+			ErrorIfExists:    false,
+			ErrorIfNotExists: false,
+			DisableWAL:       true,
+			FS:               roFS, // Use custom FS that ignores locks
 		})
 		if err != nil {
 			if strings.Contains(err.Error(), "resource temporarily unavailable") {
